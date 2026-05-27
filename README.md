@@ -46,6 +46,12 @@ uvicorn main:app --reload
 pytest -q
 ```
 
+- E2E-проверка полного флоу на боевом API:
+
+```bash
+python scripts/e2e_flow_check.py
+```
+
 ## Основные эндпоинты
 
 - `POST /api/v1/tasks/clusterize`

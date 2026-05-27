@@ -54,3 +54,4 @@ class TaskStatusResponse(BaseModel):
     status: str
     result: dict[str, Any] | None = None
     error: str | None = None
+    progress: str | None = None

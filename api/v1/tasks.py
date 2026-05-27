@@ -34,6 +34,7 @@ async def _task_response(task_id: str, request: Request) -> TaskStatusResponse:
         status=record["status"],
         result=record.get("result"),
         error=record.get("error"),
+        progress=record.get("progress"),
     )
 
 
