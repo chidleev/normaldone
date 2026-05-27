@@ -1,15 +1,21 @@
 """Точка входа FastAPI: эндпоинты постановки и опроса фоновых задач."""
 
+import asyncio
 import logging
 import uuid
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from db.vector_store import VectorStorage
+from llm.gemini_client import GeminiClient
 from ml.vectorizer import TextVectorizer
 from schemas import (
     ClusterizeRequest,
+    MemorySaveRequest,
+    MemorySaveResponse,
     NormalizeRequest,
     TaskCreateResponse,
     TaskStatus,
@@ -30,7 +36,11 @@ logger = logging.getLogger(__name__)
 async def lifespan(app_instance: FastAPI):
     """Инициализирует shared-ресурсы приложения при старте."""
     app_instance.state.vectorizer = TextVectorizer()
+    app_instance.state.vector_db = VectorStorage()
+    app_instance.state.gemini_client = GeminiClient()
     logger.info("TextVectorizer initialized")
+    logger.info("VectorStorage initialized")
+    logger.info("GeminiClient initialized")
     yield
 
 
@@ -71,7 +81,14 @@ async def clusterize(
     """Ставит задачу кластеризации в очередь и запускает mock-обработчик."""
     task_id = str(uuid.uuid4())
     create_task(task_id)
-    background_tasks.add_task(mock_clusterize_task, task_id, body, app.state.vectorizer)
+    background_tasks.add_task(
+        mock_clusterize_task,
+        task_id,
+        body,
+        app.state.vectorizer,
+        app.state.vector_db,
+        app.state.gemini_client,
+    )
     logger.info("Clusterize task %s created", task_id)
     return TaskCreateResponse(task_id=task_id, status=TaskStatus.PENDING.value)
 
@@ -84,7 +101,7 @@ async def normalize(
     """Ставит задачу нормализации в очередь и запускает mock-обработчик."""
     task_id = str(uuid.uuid4())
     create_task(task_id)
-    background_tasks.add_task(mock_normalize_task, task_id, body)
+    background_tasks.add_task(mock_normalize_task, task_id, body, app.state.gemini_client)
     logger.info("Normalize task %s created", task_id)
     return TaskCreateResponse(task_id=task_id, status=TaskStatus.PENDING.value)
 
@@ -102,3 +119,17 @@ async def task_result(task_id: str) -> TaskStatusResponse:
     иначе — текущий статус и поле error при наличии.
     """
     return _task_response(task_id)
+
+
+@app.post("/api/v1/memory/save", response_model=MemorySaveResponse)
+async def save_memory(body: MemorySaveRequest) -> MemorySaveResponse:
+    """Сохраняет товары с атрибутами в локальную векторную память."""
+    texts: list[str] = [item.text for item in body.items]
+    attributes: list[dict[str, Any]] = [item.attributes for item in body.items]
+    vectors: list[list[float]] = await asyncio.to_thread(
+        app.state.vectorizer.get_embeddings,
+        texts,
+    )
+    await asyncio.to_thread(app.state.vector_db.save_items, texts, vectors, attributes)
+    logger.info("Saved %s items to vector memory", len(texts))
+    return MemorySaveResponse(saved_count=len(texts))
