@@ -1,9 +1,10 @@
-"""Фоновые задачи и in-memory хранилище статусов."""
+"""Фоновые задачи с хранением статусов в Redis."""
 
 import asyncio
 import logging
 from typing import Any
 
+from db.redis_client import RedisStorage
 from db.vector_store import VectorStorage
 from llm.gemini_client import GeminiClient
 from ml.clusterizer import ItemClusterizer
@@ -13,28 +14,37 @@ from utils.standardizer import DataStandardizer
 
 logger = logging.getLogger(__name__)
 
-# In-memory хранилище; в будущих тикетах заменится на Redis.
-tasks_store: dict[str, dict[str, Any]] = {}
-
-
-def create_task(task_id: str) -> None:
-    """Регистрирует новую задачу со статусом PENDING."""
-    tasks_store[task_id] = {
+async def create_task(task_id: str, redis_storage: RedisStorage) -> None:
+    """Регистрирует новую задачу со статусом PENDING в Redis."""
+    state = {
         "status": TaskStatus.PENDING.value,
         "result": None,
         "error": None,
     }
+    await redis_storage.set_task_state(task_id, state)
 
 
-def get_task(task_id: str) -> dict[str, Any] | None:
+async def get_task(task_id: str, redis_storage: RedisStorage) -> dict[str, Any] | None:
     """Возвращает запись задачи или None, если идентификатор не найден."""
-    return tasks_store.get(task_id)
+    return await redis_storage.get_task_state(task_id)
 
 
-def _set_status(task_id: str, status: TaskStatus) -> None:
-    """Обновляет статус существующей задачи."""
-    if task_id in tasks_store:
-        tasks_store[task_id]["status"] = status.value
+async def _set_task_state(
+    task_id: str,
+    redis_storage: RedisStorage,
+    *,
+    status: TaskStatus,
+    result: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> None:
+    """Обновляет состояние задачи в Redis."""
+    current = await redis_storage.get_task_state(task_id) or {}
+    state = {
+        "status": status.value,
+        "result": result if result is not None else current.get("result"),
+        "error": error if error is not None else current.get("error"),
+    }
+    await redis_storage.set_task_state(task_id, state)
 
 
 async def clusterize_task(
@@ -43,10 +53,11 @@ async def clusterize_task(
     vectorizer: TextVectorizer,
     vector_db: VectorStorage,
     gemini_client: GeminiClient,
+    redis_storage: RedisStorage,
 ) -> None:
     """Выполняет кластеризацию с учетом памяти и атрибутов от Gemini."""
     try:
-        _set_status(task_id, TaskStatus.PROCESSING)
+        await _set_task_state(task_id, redis_storage, status=TaskStatus.PROCESSING)
         embeddings: list[list[float]] = await asyncio.to_thread(
             vectorizer.get_embeddings,
             data.items,
@@ -83,8 +94,7 @@ async def clusterize_task(
         )
         for cluster in new_item_clusters:
             cluster_items = [str(item) for item in cluster.get("cluster_items", [])]
-            cluster_specific_attrs: list[str] = await asyncio.to_thread(
-                gemini_client.get_cluster_attributes,
+            cluster_specific_attrs: list[str] = await gemini_client.get_cluster_attributes(
                 cluster_items,
                 data.base_attributes,
             )
@@ -92,19 +102,29 @@ async def clusterize_task(
             cluster["attributes"] = combined_attributes
         print(f"Unknown clusters: {new_item_clusters}")
         await asyncio.sleep(10)
-        tasks_store[task_id]["result"] = {
+        result_payload = {
             "embeddings_count": len(embeddings),
             "known_items": known_items,
             "new_item_clusters": new_item_clusters,
             "base_attributes": data.base_attributes,
             "message": "Clusterization completed",
         }
-        _set_status(task_id, TaskStatus.COMPLETED)
+        await _set_task_state(
+            task_id,
+            redis_storage,
+            status=TaskStatus.COMPLETED,
+            result=result_payload,
+            error=None,
+        )
         logger.info("Clusterize task %s completed", task_id)
     except Exception as exc:
         logger.exception("Clusterize task %s failed", task_id)
-        tasks_store[task_id]["status"] = TaskStatus.FAILED.value
-        tasks_store[task_id]["error"] = str(exc)
+        await _set_task_state(
+            task_id,
+            redis_storage,
+            status=TaskStatus.FAILED,
+            error=str(exc),
+        )
 
 
 async def normalize_task(
@@ -112,17 +132,17 @@ async def normalize_task(
     data: NormalizeRequest,
     gemini_client: GeminiClient,
     standardizer: DataStandardizer,
+    redis_storage: RedisStorage,
 ) -> None:
     """Выполняет батч-нормализацию через Gemini и очистку значений."""
     try:
-        _set_status(task_id, TaskStatus.PROCESSING)
+        await _set_task_state(task_id, redis_storage, status=TaskStatus.PROCESSING)
         batch_size = 40
         normalized_items: list[dict[str, Any]] = []
         for cluster in data.clusters:
             for idx in range(0, len(cluster.items), batch_size):
                 items_batch = cluster.items[idx : idx + batch_size]
-                batch_result: list[dict[str, Any]] = await asyncio.to_thread(
-                    gemini_client.normalize_items,
+                batch_result: list[dict[str, Any]] = await gemini_client.normalize_items(
                     items_batch,
                     cluster.attributes,
                 )
@@ -133,13 +153,23 @@ async def normalize_task(
                     )
                     normalized_entry["values"] = standardized_values
                     normalized_items.append(normalized_entry)
-        tasks_store[task_id]["result"] = {
+        result_payload = {
             "normalized": normalized_items,
             "message": "Normalization completed with Gemini",
         }
-        _set_status(task_id, TaskStatus.COMPLETED)
+        await _set_task_state(
+            task_id,
+            redis_storage,
+            status=TaskStatus.COMPLETED,
+            result=result_payload,
+            error=None,
+        )
         logger.info("Normalize task %s completed", task_id)
     except Exception as exc:
         logger.exception("Normalize task %s failed", task_id)
-        tasks_store[task_id]["status"] = TaskStatus.FAILED.value
-        tasks_store[task_id]["error"] = str(exc)
+        await _set_task_state(
+            task_id,
+            redis_storage,
+            status=TaskStatus.FAILED,
+            error=str(exc),
+        )

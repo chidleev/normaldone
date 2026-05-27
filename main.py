@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from db.redis_client import RedisStorage
 from db.vector_store import VectorStorage
 from llm.gemini_client import GeminiClient
 from ml.vectorizer import TextVectorizer
@@ -36,15 +37,18 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI):
     """Инициализирует shared-ресурсы приложения при старте."""
+    app_instance.state.redis = RedisStorage()
     app_instance.state.vectorizer = TextVectorizer()
     app_instance.state.vector_db = VectorStorage()
-    app_instance.state.gemini_client = GeminiClient()
+    app_instance.state.gemini_client = GeminiClient(app_instance.state.redis)
     app_instance.state.standardizer = DataStandardizer()
+    logger.info("RedisStorage initialized")
     logger.info("TextVectorizer initialized")
     logger.info("VectorStorage initialized")
     logger.info("GeminiClient initialized")
     logger.info("DataStandardizer initialized")
     yield
+    await app_instance.state.redis.close()
 
 
 app = FastAPI(
@@ -63,9 +67,9 @@ app.add_middleware(
 )
 
 
-def _task_response(task_id: str) -> TaskStatusResponse:
+async def _task_response(task_id: str) -> TaskStatusResponse:
     """Собирает ответ по записи задачи из хранилища."""
-    record = get_task(task_id)
+    record = await get_task(task_id, app.state.redis)
     if record is None:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
     return TaskStatusResponse(
@@ -83,7 +87,7 @@ async def clusterize(
 ) -> TaskCreateResponse:
     """Ставит задачу кластеризации в очередь и запускает обработчик."""
     task_id = str(uuid.uuid4())
-    create_task(task_id)
+    await create_task(task_id, app.state.redis)
     background_tasks.add_task(
         clusterize_task,
         task_id,
@@ -91,6 +95,7 @@ async def clusterize(
         app.state.vectorizer,
         app.state.vector_db,
         app.state.gemini_client,
+        app.state.redis,
     )
     logger.info("Clusterize task %s created", task_id)
     return TaskCreateResponse(task_id=task_id, status=TaskStatus.PENDING.value)
@@ -103,13 +108,14 @@ async def normalize(
 ) -> TaskCreateResponse:
     """Ставит задачу нормализации в очередь и запускает обработчик."""
     task_id = str(uuid.uuid4())
-    create_task(task_id)
+    await create_task(task_id, app.state.redis)
     background_tasks.add_task(
         normalize_task,
         task_id,
         body,
         app.state.gemini_client,
         app.state.standardizer,
+        app.state.redis,
     )
     logger.info("Normalize task %s created", task_id)
     return TaskCreateResponse(task_id=task_id, status=TaskStatus.PENDING.value)
@@ -118,7 +124,7 @@ async def normalize(
 @app.get("/api/v1/tasks/{task_id}/status", response_model=TaskStatusResponse)
 async def task_status(task_id: str) -> TaskStatusResponse:
     """Возвращает текущий статус задачи по идентификатору."""
-    return _task_response(task_id)
+    return await _task_response(task_id)
 
 
 @app.get("/api/v1/tasks/{task_id}/result", response_model=TaskStatusResponse)
@@ -127,7 +133,7 @@ async def task_result(task_id: str) -> TaskStatusResponse:
     Возвращает результат при статусе COMPLETED;
     иначе — текущий статус и поле error при наличии.
     """
-    return _task_response(task_id)
+    return await _task_response(task_id)
 
 
 @app.post("/api/v1/memory/save", response_model=MemorySaveResponse)
