@@ -1,4 +1,4 @@
-from utils.standardizer import DataStandardizer
+from infrastructure.utils.standardizer import DataStandardizer
 
 
 def test_replaces_latin_unit_in_number_pair() -> None:

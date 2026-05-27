@@ -27,7 +27,6 @@ class DataStandardizer:
         for canonical, synonyms in self.rules.items():
             all_variants = [canonical, *synonyms]
             escaped_variants = [re.escape(variant) for variant in all_variants]
-            # Не допускаем замен внутри других слов.
             pattern = re.compile(
                 rf"(?<!\w)(?:{'|'.join(escaped_variants)})(?!\w)",
                 flags=re.IGNORECASE,

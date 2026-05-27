@@ -12,42 +12,24 @@ from typing import Any
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from db.redis_client import RedisStorage
+from schemas.llm import ClusterAttributesResponse, NormalizeItemsResponse
+from service.ports.cache_store import CacheStorePort
 
 logger = logging.getLogger(__name__)
-
-
-class ClusterAttributesResponse(BaseModel):
-    """Структура ответа для подбора атрибутов кластера."""
-
-    attributes: list[str] = Field(default_factory=list)
-
-
-class NormalizedItem(BaseModel):
-    """Нормализованный товар с извлеченными свойствами."""
-
-    item: str
-    values: dict[str, str]
-
-
-class NormalizeItemsResponse(BaseModel):
-    """Структура ответа для нормализации группы товаров."""
-
-    normalized: list[NormalizedItem] = Field(default_factory=list)
 
 
 class GeminiClient:
     """Клиент Gemini 3.1 Flash Lite с поддержкой web search."""
 
-    def __init__(self, redis_storage: RedisStorage) -> None:
+    def __init__(self, cache_store: CacheStorePort) -> None:
         """Читает токен из .env и инициализирует SDK-клиент."""
         load_dotenv()
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("GEMINI_API_KEY is not set in environment")
-        self.redis_storage = redis_storage
+        self.cache_store = cache_store
         self.client = genai.Client(api_key=api_key)
         self.model_name: str = "gemini-3.1-flash-lite"
         self.max_retries: int = 3
@@ -66,7 +48,7 @@ class GeminiClient:
     ) -> dict[str, Any]:
         """Выполняет запрос к Gemini и возвращает JSON с повторами при ошибках."""
         cache_key = self._build_cache_key(prompt, items)
-        cached = await self.redis_storage.get_cache(cache_key)
+        cached = await self.cache_store.get_cache(cache_key)
         if cached is not None:
             return cached
 
@@ -86,7 +68,7 @@ class GeminiClient:
                 )
                 raw_text: str = response.text if response.text else "{}"
                 data = json.loads(raw_text)
-                await self.redis_storage.set_cache(cache_key, data)
+                await self.cache_store.set_cache(cache_key, data)
                 return data
             except Exception as exc:
                 error_text = str(exc).lower()

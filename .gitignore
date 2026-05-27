@@ -11,6 +11,7 @@ env/
 # Environment files
 .env
 .env.*
+!.env.example
 
 # Build and packaging
 build/
@@ -33,3 +34,5 @@ Thumbs.db
 
 tickets/
 .cursorrules
+.agents/
+skills-lock.json
