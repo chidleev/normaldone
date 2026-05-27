@@ -3,7 +3,7 @@
 FastAPI-сервер для кластеризации и нормализации товарной номенклатуры с:
 
 - локальной векторизацией (`sentence-transformers`),
-- локальной векторной памятью (`ChromaDB`),
+- локальной векторной памятью (`Qdrant`),
 - кэшированием и статусами задач в `Redis`,
 - LLM-нормализацией через `Gemini`.
 
@@ -27,6 +27,7 @@ docker-compose up -d --build
 
 - API: `http://localhost:8000`
 - Redis: `localhost:6379`
+- Qdrant: `http://localhost:6333`
 
 ## Локальный запуск (без Docker)
 
@@ -43,12 +44,6 @@ uvicorn main:app --reload
 
 ```bash
 pytest -q
-```
-
-- Очистка Redis-кэша и статусов:
-
-```bash
-python scripts/flush_redis_cache.py
 ```
 
 ## Основные эндпоинты

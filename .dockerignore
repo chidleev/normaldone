@@ -12,7 +12,7 @@ env/
 
 .env
 
-chroma_data/
+qdrant_data/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

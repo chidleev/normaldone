@@ -39,6 +39,7 @@ async def _set_task_state(
     status: TaskStatus,
     result: dict[str, Any] | None = None,
     error: str | None = None,
+    progress: str | None = None,
 ) -> None:
     """Обновляет состояние задачи в Redis."""
     current = await task_store.get_task_state(task_id) or {}
@@ -47,7 +48,25 @@ async def _set_task_state(
         "result": result if result is not None else current.get("result"),
         "error": error if error is not None else current.get("error"),
     }
+    if progress is not None:
+        state["progress"] = progress
+    elif status == TaskStatus.PROCESSING and current.get("progress"):
+        state["progress"] = current["progress"]
     await task_store.set_task_state(task_id, state)
+
+
+async def _touch_processing(
+    task_id: str,
+    task_store: TaskStorePort,
+    progress: str,
+) -> None:
+    """Продлевает PROCESSING в Redis во время долгих пауз Gemini."""
+    await _set_task_state(
+        task_id,
+        task_store,
+        status=TaskStatus.PROCESSING,
+        progress=progress,
+    )
 
 
 async def clusterize_task(
@@ -91,8 +110,16 @@ async def clusterize_task(
             unknown_items,
             unknown_vectors,
         )
-        for cluster in new_item_clusters:
+        for cluster_index, cluster in enumerate(new_item_clusters, start=1):
             cluster_items = [str(item) for item in cluster.get("cluster_items", [])]
+            await _touch_processing(
+                task_id,
+                task_store,
+                progress=(
+                    f"Gemini: кластер {cluster_index}/{len(new_item_clusters)} "
+                    f"({len(cluster_items)} товаров)"
+                ),
+            )
             cluster_specific_attrs: list[str] = await gemini_client.get_cluster_attributes(
                 cluster_items,
                 data.base_attributes,
@@ -137,22 +164,27 @@ async def normalize_task(
     """Выполняет батч-нормализацию через Gemini и очистку значений."""
     try:
         await _set_task_state(task_id, task_store, status=TaskStatus.PROCESSING)
-        batch_size = 40
         normalized_items: list[dict[str, Any]] = []
-        for cluster in data.clusters:
-            for idx in range(0, len(cluster.items), batch_size):
-                items_batch = cluster.items[idx : idx + batch_size]
-                batch_result: list[dict[str, Any]] = await gemini_client.normalize_items(
-                    items_batch,
-                    cluster.attributes,
+        for cluster_index, cluster in enumerate(data.clusters, start=1):
+            await _touch_processing(
+                task_id,
+                task_store,
+                progress=(
+                    f"Gemini: нормализация кластера {cluster_index}/{len(data.clusters)} "
+                    f"({len(cluster.items)} товаров)"
+                ),
+            )
+            batch_result: list[dict[str, Any]] = await gemini_client.normalize_items(
+                cluster.items,
+                cluster.attributes,
+            )
+            for normalized_entry in batch_result:
+                values_raw: dict[str, Any] = dict(normalized_entry.get("values", {}))
+                standardized_values = standardizer.process_item(
+                    {k: str(v) for k, v in values_raw.items()}
                 )
-                for normalized_entry in batch_result:
-                    values_raw: dict[str, Any] = dict(normalized_entry.get("values", {}))
-                    standardized_values = standardizer.process_item(
-                        {k: str(v) for k, v in values_raw.items()}
-                    )
-                    normalized_entry["values"] = standardized_values
-                    normalized_items.append(normalized_entry)
+                normalized_entry["values"] = standardized_values
+                normalized_items.append(normalized_entry)
         result_payload: dict[str, Any] = {
             "normalized": normalized_items,
             "message": "Normalization completed with Gemini",

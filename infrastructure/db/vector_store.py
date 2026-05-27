@@ -1,26 +1,27 @@
-"""Обертка над ChromaDB для хранения товарной памяти."""
+"""Обертка над Qdrant для хранения товарной памяти."""
 
 from __future__ import annotations
 
 import hashlib
-import json
+import os
 from typing import Any
 
-import chromadb
-from chromadb.api.models.Collection import Collection
-from chromadb.config import Settings
+from qdrant_client import QdrantClient
+from qdrant_client.http import models
 
 
 class VectorStorage:
-    """Хранилище эмбеддингов и атрибутов товаров в локальной ChromaDB."""
+    """Хранилище эмбеддингов и атрибутов товаров в Qdrant."""
 
-    def __init__(self, data_path: str = "./chroma_data") -> None:
-        """Инициализирует PersistentClient и коллекцию памяти."""
-        self.client = chromadb.PersistentClient(path=data_path, settings=Settings())
-        self.collection: Collection = self.client.get_or_create_collection(
-            name="nomenclature_memory",
-            metadata={"hnsw:space": "cosine"},
-        )
+    def __init__(self, collection_name: str = "nomenclature_memory") -> None:
+        """Инициализирует клиент Qdrant и создает коллекцию при необходимости."""
+        qdrant_url = os.getenv("QDRANT_URL")
+        qdrant_path = os.getenv("QDRANT_PATH", "./qdrant_data")
+        if qdrant_url:
+            self.client = QdrantClient(url=qdrant_url)
+        else:
+            self.client = QdrantClient(path=qdrant_path)
+        self.collection_name = collection_name
 
     @staticmethod
     def _item_id(text: str) -> str:
@@ -39,20 +40,29 @@ class VectorStorage:
         if not texts:
             return
 
-        ids: list[str] = [self._item_id(text) for text in texts]
-        metadatas: list[dict[str, str]] = [
-            {
-                "text": text,
-                "attributes_json": json.dumps(item_attributes, ensure_ascii=False),
-            }
-            for text, item_attributes in zip(texts, attributes, strict=True)
-        ]
+        vector_size = len(vectors[0])
+        if not self.client.collection_exists(self.collection_name):
+            self.client.recreate_collection(
+                collection_name=self.collection_name,
+                vectors_config=models.VectorParams(
+                    size=vector_size,
+                    distance=models.Distance.COSINE,
+                ),
+            )
 
-        self.collection.upsert(
-            ids=ids,
-            documents=texts,
-            embeddings=vectors,
-            metadatas=metadatas,
+        points: list[models.PointStruct] = []
+        for text, vector, item_attributes in zip(texts, vectors, attributes, strict=True):
+            points.append(
+                models.PointStruct(
+                    id=self._item_id(text),
+                    vector=vector,
+                    payload={"text": text, "attributes": item_attributes},
+                )
+            )
+
+        self.client.upsert(
+            collection_name=self.collection_name,
+            points=points,
         )
 
     def find_similar(
@@ -69,29 +79,31 @@ class VectorStorage:
         """
         if not vectors:
             return []
-
-        query_result = self.collection.query(
-            query_embeddings=vectors,
-            n_results=1,
-            include=["metadatas", "distances"],
-        )
-
-        metadatas: list[list[dict[str, Any]]] = query_result.get("metadatas", [])
-        distances: list[list[float]] = query_result.get("distances", [])
+        if not self.client.collection_exists(self.collection_name):
+            return [None for _ in vectors]
 
         matches: list[dict[str, Any] | None] = []
-        for idx, vector_distances in enumerate(distances):
-            if not vector_distances:
+        for vector in vectors:
+            result = self.client.query_points(
+                collection_name=self.collection_name,
+                query=vector,
+                limit=1,
+                with_payload=True,
+            )
+            if not result.points:
                 matches.append(None)
                 continue
 
-            distance: float = vector_distances[0]
+            score = float(result.points[0].score or 0.0)
+            distance = 1.0 - score
             if distance >= threshold:
                 matches.append(None)
                 continue
-
-            metadata_row: dict[str, Any] = metadatas[idx][0]
-            raw_attributes: str = str(metadata_row.get("attributes_json", "{}"))
-            matches.append(json.loads(raw_attributes))
+            payload = result.points[0].payload or {}
+            raw_attributes = payload.get("attributes")
+            if isinstance(raw_attributes, dict):
+                matches.append(raw_attributes)
+            else:
+                matches.append(None)
 
         return matches
