@@ -9,6 +9,7 @@ from llm.gemini_client import GeminiClient
 from ml.clusterizer import ItemClusterizer
 from ml.vectorizer import TextVectorizer
 from schemas import ClusterizeRequest, NormalizeRequest, TaskStatus
+from utils.standardizer import DataStandardizer
 
 logger = logging.getLogger(__name__)
 
@@ -36,16 +37,14 @@ def _set_status(task_id: str, status: TaskStatus) -> None:
         tasks_store[task_id]["status"] = status.value
 
 
-async def mock_clusterize_task(
+async def clusterize_task(
     task_id: str,
     data: ClusterizeRequest,
     vectorizer: TextVectorizer,
     vector_db: VectorStorage,
     gemini_client: GeminiClient,
 ) -> None:
-    """
-    Имитирует долгую кластеризацию: PROCESSING → пауза 10 с → тестовый результат.
-    """
+    """Выполняет кластеризацию с учетом памяти и атрибутов от Gemini."""
     try:
         _set_status(task_id, TaskStatus.PROCESSING)
         embeddings: list[list[float]] = await asyncio.to_thread(
@@ -98,7 +97,7 @@ async def mock_clusterize_task(
             "known_items": known_items,
             "new_item_clusters": new_item_clusters,
             "base_attributes": data.base_attributes,
-            "message": "Mock clusterization completed",
+            "message": "Clusterization completed",
         }
         _set_status(task_id, TaskStatus.COMPLETED)
         logger.info("Clusterize task %s completed", task_id)
@@ -108,14 +107,13 @@ async def mock_clusterize_task(
         tasks_store[task_id]["error"] = str(exc)
 
 
-async def mock_normalize_task(
+async def normalize_task(
     task_id: str,
     data: NormalizeRequest,
     gemini_client: GeminiClient,
+    standardizer: DataStandardizer,
 ) -> None:
-    """
-    Имитирует долгую нормализацию: PROCESSING → пауза 10 с → тестовый результат.
-    """
+    """Выполняет батч-нормализацию через Gemini и очистку значений."""
     try:
         _set_status(task_id, TaskStatus.PROCESSING)
         batch_size = 40
@@ -128,7 +126,13 @@ async def mock_normalize_task(
                     items_batch,
                     cluster.attributes,
                 )
-                normalized_items.extend(batch_result)
+                for normalized_entry in batch_result:
+                    values_raw: dict[str, Any] = dict(normalized_entry.get("values", {}))
+                    standardized_values = standardizer.process_item(
+                        {k: str(v) for k, v in values_raw.items()}
+                    )
+                    normalized_entry["values"] = standardized_values
+                    normalized_items.append(normalized_entry)
         tasks_store[task_id]["result"] = {
             "normalized": normalized_items,
             "message": "Normalization completed with Gemini",

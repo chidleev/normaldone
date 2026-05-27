@@ -22,11 +22,12 @@ from schemas import (
     TaskStatusResponse,
 )
 from services import (
+    clusterize_task,
     create_task,
     get_task,
-    mock_clusterize_task,
-    mock_normalize_task,
+    normalize_task,
 )
+from utils.standardizer import DataStandardizer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,9 +39,11 @@ async def lifespan(app_instance: FastAPI):
     app_instance.state.vectorizer = TextVectorizer()
     app_instance.state.vector_db = VectorStorage()
     app_instance.state.gemini_client = GeminiClient()
+    app_instance.state.standardizer = DataStandardizer()
     logger.info("TextVectorizer initialized")
     logger.info("VectorStorage initialized")
     logger.info("GeminiClient initialized")
+    logger.info("DataStandardizer initialized")
     yield
 
 
@@ -78,11 +81,11 @@ async def clusterize(
     body: ClusterizeRequest,
     background_tasks: BackgroundTasks,
 ) -> TaskCreateResponse:
-    """Ставит задачу кластеризации в очередь и запускает mock-обработчик."""
+    """Ставит задачу кластеризации в очередь и запускает обработчик."""
     task_id = str(uuid.uuid4())
     create_task(task_id)
     background_tasks.add_task(
-        mock_clusterize_task,
+        clusterize_task,
         task_id,
         body,
         app.state.vectorizer,
@@ -98,10 +101,16 @@ async def normalize(
     body: NormalizeRequest,
     background_tasks: BackgroundTasks,
 ) -> TaskCreateResponse:
-    """Ставит задачу нормализации в очередь и запускает mock-обработчик."""
+    """Ставит задачу нормализации в очередь и запускает обработчик."""
     task_id = str(uuid.uuid4())
     create_task(task_id)
-    background_tasks.add_task(mock_normalize_task, task_id, body, app.state.gemini_client)
+    background_tasks.add_task(
+        normalize_task,
+        task_id,
+        body,
+        app.state.gemini_client,
+        app.state.standardizer,
+    )
     logger.info("Normalize task %s created", task_id)
     return TaskCreateResponse(task_id=task_id, status=TaskStatus.PENDING.value)
 
