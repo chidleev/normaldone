@@ -7,13 +7,30 @@ import io
 import json
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
-from urllib import error, request
-
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook, load_workbook
+import os
+
+from api.task_dispatch import (
+    dispatch_clusterize,
+    dispatch_memory_save,
+    dispatch_normalize,
+    fetch_task_status,
+)
+from infrastructure.llm.factory import resolve_llm_provider
 from pydantic import BaseModel, Field
+from schemas.memory import MemoryItem, MemorySaveRequest
+from schemas.task import (
+    ClusterInput,
+    ClusterProfileProvider,
+    ClusterizeRequest,
+    EmbeddingProvider,
+    NormalizeProvider,
+    NormalizeRequest,
+)
 
 router = APIRouter(tags=["ui"])
 
@@ -30,6 +47,7 @@ class SessionData:
     base_attributes: list[str] = field(default_factory=list)
     items: list[str] = field(default_factory=list)
     embedding_provider: str = "local"
+    cluster_profile_provider: str = "g4f"
     normalize_provider: str = "g4f"
     clusterize_task_id: str | None = None
     clusterize_result: dict[str, Any] | None = None
@@ -84,6 +102,44 @@ class RowIncludePayload(BaseModel):
     included: bool
 
 
+class RowUpdatePayload(BaseModel):
+    session_id: str
+    row_index: int
+    cells: dict[str, str] = Field(default_factory=dict)
+
+
+class RowCreatePayload(BaseModel):
+    session_id: str
+    cells: dict[str, str] = Field(default_factory=dict)
+
+
+class RowDeletePayload(BaseModel):
+    session_id: str
+    row_index: int
+
+
+class ColumnAddPayload(BaseModel):
+    session_id: str
+    column_name: str
+    after_column: str | None = None
+
+
+class SetSourceColumnPayload(BaseModel):
+    session_id: str
+    column_name: str
+
+
+class ColumnRenamePayload(BaseModel):
+    session_id: str
+    old_name: str
+    new_name: str
+
+
+class ColumnDeletePayload(BaseModel):
+    session_id: str
+    column_name: str
+
+
 def _get_session(session_id: str) -> SessionData:
     session = SESSIONS.get(session_id)
     if session is None:
@@ -110,36 +166,14 @@ def _row_empty(row: dict[str, str]) -> bool:
     return all(not str(v).strip() for v in row.values())
 
 
-def _post_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
-    raw = json.dumps(payload).encode("utf-8")
-    req = request.Request(
-        url=url,
-        method="POST",
-        data=raw,
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with request.urlopen(req, timeout=120) as response:
-            body = response.read().decode("utf-8")
-            return json.loads(body) if body else {}
-    except error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise HTTPException(status_code=exc.code, detail=body) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"Backend unavailable: {exc}") from exc
-
-
-def _get_json(url: str) -> dict[str, Any]:
-    req = request.Request(url=url, method="GET")
-    try:
-        with request.urlopen(req, timeout=120) as response:
-            body = response.read().decode("utf-8")
-            return json.loads(body) if body else {}
-    except error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise HTTPException(status_code=exc.code, detail=body) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"Backend unavailable: {exc}") from exc
+def _validate_llm_provider(provider: str) -> str:
+    resolved = resolve_llm_provider(provider)
+    if resolved == "gemini" and not os.getenv("GEMINI_API_KEY"):
+        raise HTTPException(
+            status_code=400,
+            detail="GEMINI_API_KEY не задан на сервере. Укажите ключ в .env или выберите g4f.",
+        )
+    return resolved
 
 
 def _parse_csv(content: bytes) -> tuple[list[str], list[dict[str, str]]]:
@@ -185,6 +219,69 @@ def _clean_rows(rows: list[dict[str, str]]) -> tuple[list[dict[str, str]], int, 
     return cleaned, removed_empty, removed_duplicates
 
 
+def _item_cluster_name_map(clusters: list[dict[str, Any]]) -> dict[str, str]:
+    """Строит соответствие номенклатура → имя кластера из approved_clusters."""
+    mapping: dict[str, str] = {}
+    for cluster in clusters:
+        name = str(cluster.get("name", "")).strip() or "Cluster"
+        item_names = [str(i).strip() for i in cluster.get("items", []) if str(i).strip()]
+        for row in cluster.get("rows") or []:
+            item_name = str(row.get("item", "")).strip()
+            if item_name:
+                item_names.append(item_name)
+        for item_name in item_names:
+            mapping[item_name] = name
+    return mapping
+
+
+def _clusters_from_known_items(
+    known_items: list[dict[str, Any]],
+    base_attributes: list[str],
+) -> list[dict[str, Any]]:
+    """Группирует позиции из памяти по cluster_name с заполненными values."""
+    from collections import defaultdict
+
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for known in known_items:
+        item_name = str(known.get("item", "")).strip()
+        if not item_name:
+            continue
+        cluster_name = str(known.get("cluster_name") or "").strip()
+        if not cluster_name:
+            cluster_name = str(known.get("text") or "").strip() or item_name
+        groups[cluster_name].append(known)
+
+    clusters: list[dict[str, Any]] = []
+    for cluster_name, group in groups.items():
+        attr_keys: list[str] = []
+        rows: list[dict[str, Any]] = []
+        items: list[str] = []
+        for known in group:
+            item_name = str(known.get("item", "")).strip()
+            attrs = known.get("attributes")
+            values: dict[str, str] = {}
+            if isinstance(attrs, dict):
+                values = {
+                    str(key).strip(): str(value).strip()
+                    for key, value in attrs.items()
+                    if str(key).strip()
+                }
+            for key in values:
+                if key not in attr_keys:
+                    attr_keys.append(key)
+            items.append(item_name)
+            rows.append({"item": item_name, "values": values})
+        clusters.append(
+            {
+                "name": cluster_name,
+                "attributes": attr_keys or list(base_attributes),
+                "items": items,
+                "rows": rows,
+            }
+        )
+    return clusters
+
+
 def _build_default_clusters(clusterize_result: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not clusterize_result:
         return []
@@ -198,19 +295,65 @@ def _build_default_clusters(clusterize_result: dict[str, Any] | None) -> list[di
                 "items": [str(item) for item in cluster.get("cluster_items", []) if str(item).strip()],
             }
         )
-    for idx, known in enumerate(clusterize_result.get("known_items", []), start=1):
-        attrs = known.get("attributes")
-        attr_keys = list(attrs.keys()) if isinstance(attrs, dict) else base_attributes
-        item_name = str(known.get("item", "")).strip()
-        if item_name:
-            clusters.append(
+    clusters.extend(
+        _clusters_from_known_items(
+            list(clusterize_result.get("known_items") or []),
+            base_attributes,
+        )
+    )
+    return clusters
+
+
+def _clusters_for_ui(session: SessionData) -> list[dict[str, Any]]:
+    """Кластеры для UI: items + rows с values после нормализации."""
+    clusters = session.approved_clusters or []
+    normalized_map: dict[str, dict[str, Any]] = {
+        str(row.get("item", "")).strip(): dict(row.get("values") or {})
+        for row in (session.normalize_result or {}).get("normalized") or []
+        if str(row.get("item", "")).strip()
+    }
+
+    payload: list[dict[str, Any]] = []
+    for cluster in clusters:
+        name = str(cluster.get("name", "")).strip() or "Cluster"
+        attrs = [str(a).strip() for a in cluster.get("attributes", []) if str(a).strip()]
+        items = [str(i).strip() for i in cluster.get("items", []) if str(i).strip()]
+        stored_rows_map: dict[str, dict[str, Any]] = {
+            str(row.get("item", "")).strip(): dict(row.get("values") or {})
+            for row in cluster.get("rows") or []
+            if str(row.get("item", "")).strip()
+        }
+        rows: list[dict[str, Any]] = []
+        for item_name in items:
+            values_raw = {
+                **stored_rows_map.get(item_name, {}),
+                **normalized_map.get(item_name, {}),
+            }
+            row_attrs = list(attrs)
+            for key in values_raw:
+                key_name = str(key).strip()
+                if key_name and key_name not in row_attrs:
+                    row_attrs.append(key_name)
+            rows.append(
                 {
-                    "name": f"Known {idx}",
-                    "attributes": attr_keys or base_attributes,
-                    "items": [item_name],
+                    "item": item_name,
+                    "values": {attr: str(values_raw.get(attr, "")).strip() for attr in row_attrs},
                 }
             )
-    return clusters
+        merged_attrs = list(attrs)
+        for row in rows:
+            for attr in row["values"]:
+                if attr not in merged_attrs:
+                    merged_attrs.append(attr)
+        payload.append(
+            {
+                "name": name,
+                "attributes": merged_attrs or attrs,
+                "items": items,
+                "rows": rows,
+            }
+        )
+    return payload
 
 
 @router.post("/ui/api/session/new")
@@ -268,6 +411,7 @@ async def upload_data(
     _reset_session_state(session)
     session.headers = headers
     session.cleaned_rows = cleaned_rows
+    session.selected_column = headers[0] if headers else None
 
     return {
         "headers": headers,
@@ -330,14 +474,121 @@ async def set_row_included(payload: RowIncludePayload) -> dict[str, Any]:
     return {"status": "ok"}
 
 
+@router.post("/ui/api/rows/update")
+async def update_row(payload: RowUpdatePayload) -> dict[str, Any]:
+    session = _get_session(payload.session_id)
+    if payload.row_index < 0 or payload.row_index >= len(session.cleaned_rows):
+        raise HTTPException(status_code=400, detail="row_index out of range")
+    row = session.cleaned_rows[payload.row_index]
+    for key, value in payload.cells.items():
+        key_name = str(key).strip()
+        if key_name in session.headers:
+            row[key_name] = str(value or "").strip()
+    return {"status": "ok", "row_index": payload.row_index, "cells": row}
+
+
+@router.post("/ui/api/rows/add")
+async def add_row(payload: RowCreatePayload) -> dict[str, Any]:
+    session = _get_session(payload.session_id)
+    if not session.headers:
+        raise HTTPException(status_code=400, detail="Upload file first")
+    new_row = {header: "" for header in session.headers}
+    for key, value in payload.cells.items():
+        key_name = str(key).strip()
+        if key_name in session.headers:
+            new_row[key_name] = str(value or "").strip()
+    source_col = session.selected_column or session.headers[0]
+    if not str(new_row.get(source_col, "")).strip():
+        raise HTTPException(status_code=400, detail="Source nomenclature is required")
+    session.cleaned_rows.insert(0, new_row)
+    session.excluded_row_indices = {idx + 1 for idx in session.excluded_row_indices}
+    return {"status": "ok", "row_index": 0, "cells": new_row}
+
+
+@router.post("/ui/api/rows/delete")
+async def delete_row(payload: RowDeletePayload) -> dict[str, Any]:
+    session = _get_session(payload.session_id)
+    if payload.row_index < 0 or payload.row_index >= len(session.cleaned_rows):
+        raise HTTPException(status_code=400, detail="row_index out of range")
+    session.cleaned_rows.pop(payload.row_index)
+    updated_excluded: set[int] = set()
+    for idx in session.excluded_row_indices:
+        if idx == payload.row_index:
+            continue
+        updated_excluded.add(idx - 1 if idx > payload.row_index else idx)
+    session.excluded_row_indices = updated_excluded
+    return {"status": "ok"}
+
+
+@router.post("/ui/api/columns/add")
+async def add_column(payload: ColumnAddPayload) -> dict[str, Any]:
+    session = _get_session(payload.session_id)
+    name = payload.column_name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="column_name is required")
+    if name in session.headers:
+        raise HTTPException(status_code=400, detail="Column already exists")
+    anchor = (payload.after_column or "").strip() or session.selected_column or ""
+    if not anchor and session.headers:
+        anchor = session.headers[0]
+    if anchor and anchor in session.headers:
+        insert_at = session.headers.index(anchor) + 1
+    else:
+        insert_at = 0
+    session.headers.insert(insert_at, name)
+    for row in session.cleaned_rows:
+        row[name] = ""
+    return {"status": "ok", "headers": session.headers}
+
+
+@router.post("/ui/api/columns/set-source")
+async def set_source_column(payload: SetSourceColumnPayload) -> dict[str, Any]:
+    session = _get_session(payload.session_id)
+    name = payload.column_name.strip()
+    if name not in session.headers:
+        raise HTTPException(status_code=400, detail="Column not found")
+    session.selected_column = name
+    return {"selected_column": name, "headers": session.headers}
+
+
+@router.post("/ui/api/columns/rename")
+async def rename_column(payload: ColumnRenamePayload) -> dict[str, Any]:
+    session = _get_session(payload.session_id)
+    old_name = payload.old_name.strip()
+    new_name = payload.new_name.strip()
+    if not old_name or not new_name:
+        raise HTTPException(status_code=400, detail="old_name and new_name are required")
+    if old_name not in session.headers:
+        raise HTTPException(status_code=400, detail="Column not found")
+    if new_name != old_name and new_name in session.headers:
+        raise HTTPException(status_code=400, detail="New column name already exists")
+    idx = session.headers.index(old_name)
+    session.headers[idx] = new_name
+    for row in session.cleaned_rows:
+        row[new_name] = row.pop(old_name, "")
+    return {"status": "ok", "headers": session.headers}
+
+
+@router.post("/ui/api/columns/delete")
+async def delete_column(payload: ColumnDeletePayload) -> dict[str, Any]:
+    session = _get_session(payload.session_id)
+    name = payload.column_name.strip()
+    if name not in session.headers:
+        raise HTTPException(status_code=400, detail="Column not found")
+    if len(session.headers) <= 1:
+        raise HTTPException(status_code=400, detail="Cannot delete the last column")
+    session.headers = [h for h in session.headers if h != name]
+    for row in session.cleaned_rows:
+        row.pop(name, None)
+    return {"status": "ok", "headers": session.headers}
+
+
 @router.post("/ui/api/configure")
 async def configure(payload: ConfigurePayload) -> dict[str, Any]:
     session = _get_session(payload.session_id)
     if payload.selected_column not in session.headers:
         raise HTTPException(status_code=400, detail="Selected column not found")
     attrs = [a.strip() for a in payload.base_attributes if a.strip()]
-    if not attrs:
-        raise HTTPException(status_code=400, detail="Provide at least one base attribute")
     items = [
         str(row.get(payload.selected_column, "")).strip()
         for idx, row in enumerate(session.cleaned_rows)
@@ -354,49 +605,66 @@ async def configure(payload: ConfigurePayload) -> dict[str, Any]:
 
 
 @router.post("/ui/api/clusterize/start")
-async def start_clusterize(payload: ClusterizeStartPayload) -> dict[str, Any]:
+async def start_clusterize(
+    payload: ClusterizeStartPayload,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
     session = _get_session(payload.session_id)
-    session.base_url = payload.base_url.rstrip("/")
     if not session.items:
         raise HTTPException(status_code=400, detail="Upload file and save config first")
-    session.embedding_provider = payload.embedding_provider
-    response = _post_json(
-        f"{session.base_url}/api/v1/tasks/clusterize",
-        {
-            "items": session.items,
-            "base_attributes": session.base_attributes,
-            "embedding_provider": session.embedding_provider,
-            "cluster_profile_provider": payload.profile_provider,
-        },
+    session.embedding_provider = payload.embedding_provider.strip().lower()
+    session.cluster_profile_provider = _validate_llm_provider(payload.profile_provider)
+    try:
+        embedding = EmbeddingProvider(session.embedding_provider)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    body = ClusterizeRequest(
+        items=session.items,
+        base_attributes=session.base_attributes,
+        embedding_provider=embedding,
+        cluster_profile_provider=ClusterProfileProvider(session.cluster_profile_provider),
     )
-    task_id = str(response.get("task_id", "")).strip()
-    if not task_id:
-        raise HTTPException(status_code=502, detail="Backend did not return task_id")
-    session.clusterize_task_id = task_id
-    return response
+    created = await dispatch_clusterize(request, body, background_tasks)
+    session.clusterize_task_id = created.task_id
+    return {
+        "task_id": created.task_id,
+        "status": created.status,
+        "cluster_profile_provider": session.cluster_profile_provider,
+        "embedding_provider": session.embedding_provider,
+    }
 
 
 @router.post("/ui/api/normalize/start")
-async def start_normalize(payload: StartTaskPayload) -> dict[str, Any]:
+async def start_normalize(
+    payload: StartTaskPayload,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
     session = _get_session(payload.session_id)
-    session.base_url = payload.base_url.rstrip("/")
     if not session.approved_clusters:
         raise HTTPException(status_code=400, detail="Approve clusters first")
     if payload.provider:
-        session.normalize_provider = payload.provider
-    response = _post_json(
-        f"{session.base_url}/api/v1/tasks/normalize",
-        {"clusters": session.approved_clusters, "llm_provider": session.normalize_provider},
+        session.normalize_provider = _validate_llm_provider(payload.provider)
+    clusters = [
+        ClusterInput(
+            name=str(cluster.get("name", "")).strip() or "Cluster",
+            attributes=[str(a).strip() for a in cluster.get("attributes", []) if str(a).strip()],
+            items=[str(i).strip() for i in cluster.get("items", []) if str(i).strip()],
+        )
+        for cluster in session.approved_clusters
+    ]
+    body = NormalizeRequest(
+        clusters=clusters,
+        llm_provider=NormalizeProvider(session.normalize_provider),
     )
-    task_id = str(response.get("task_id", "")).strip()
-    if not task_id:
-        raise HTTPException(status_code=502, detail="Backend did not return task_id")
-    session.normalize_task_id = task_id
-    return response
+    created = await dispatch_normalize(request, body, background_tasks)
+    session.normalize_task_id = created.task_id
+    return {"task_id": created.task_id, "status": created.status}
 
 
 @router.get("/ui/api/task/{session_id}/{task_type}")
-async def get_task_status(session_id: str, task_type: str) -> dict[str, Any]:
+async def get_task_status(session_id: str, task_type: str, request: Request) -> dict[str, Any]:
     session = _get_session(session_id)
     task_id = session.clusterize_task_id if task_type == "clusterize" else session.normalize_task_id
     if task_type not in {"clusterize", "normalize"}:
@@ -404,22 +672,22 @@ async def get_task_status(session_id: str, task_type: str) -> dict[str, Any]:
     if not task_id:
         raise HTTPException(status_code=400, detail="Task not started")
 
-    status_payload = _get_json(f"{session.base_url}/api/v1/tasks/{task_id}/status")
-    if status_payload.get("status") != "COMPLETED":
-        return status_payload
-    result_payload = _get_json(f"{session.base_url}/api/v1/tasks/{task_id}/result")
+    status = await fetch_task_status(task_id, request)
+    payload = status.model_dump()
+    if status.status != "COMPLETED":
+        return payload
     if task_type == "clusterize":
-        session.clusterize_result = result_payload.get("result") or {}
+        session.clusterize_result = status.result or {}
         if not session.approved_clusters:
             session.approved_clusters = _build_default_clusters(session.clusterize_result)
     else:
-        session.normalize_result = result_payload.get("result") or {}
-    return result_payload
+        session.normalize_result = status.result or {}
+    return payload
 
 
 @router.get("/ui/api/clusters/{session_id}")
 async def get_clusters(session_id: str) -> dict[str, Any]:
-    return {"clusters": _get_session(session_id).approved_clusters}
+    return {"clusters": _clusters_for_ui(_get_session(session_id))}
 
 
 @router.post("/ui/api/clusters/save")
@@ -440,20 +708,40 @@ async def save_clusters(payload: ClustersPayload) -> dict[str, Any]:
 
 
 @router.post("/ui/api/memory/save")
-async def save_memory(payload: SaveMemoryPayload) -> dict[str, Any]:
+async def save_memory(payload: SaveMemoryPayload, request: Request) -> dict[str, Any]:
     session = _get_session(payload.session_id)
-    session.base_url = payload.base_url.rstrip("/")
     normalized = (session.normalize_result or {}).get("normalized") or []
     if not normalized:
         raise HTTPException(status_code=400, detail="Normalize result is empty")
-    items = []
+    if not session.approved_clusters:
+        raise HTTPException(status_code=400, detail="No clusters to map items to memory")
+    cluster_by_item = _item_cluster_name_map(session.approved_clusters)
+    items: list[MemoryItem] = []
     for row in normalized:
         item_name = str(row.get("item", "")).strip()
-        if item_name:
-            items.append({"text": item_name, "attributes": dict(row.get("values", {}))})
+        if not item_name:
+            continue
+        cluster_name = cluster_by_item.get(item_name)
+        if not cluster_name:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Item not found in approved clusters: {item_name}",
+            )
+        items.append(
+            MemoryItem(
+                text=item_name,
+                attributes=dict(row.get("values", {})),
+                cluster_name=cluster_name,
+            )
+        )
     if not items:
         raise HTTPException(status_code=400, detail="No valid normalized items")
-    return _post_json(f"{session.base_url}/api/v1/memory/save", {"items": items})
+    saved = await dispatch_memory_save(
+        request,
+        MemorySaveRequest(items=items),
+        embedding_provider=session.embedding_provider,
+    )
+    return {"saved_count": saved.saved_count}
 
 
 @router.get("/ui/api/export/{session_id}/xlsx")
@@ -489,3 +777,34 @@ async def export_xlsx(session_id: str) -> StreamingResponse:
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="clusters_export.xlsx"'},
     )
+
+
+@router.post("/ui/api/admin/flush-redis")
+async def flush_redis_cache(request: Request) -> dict[str, Any]:
+    """Очищает Redis: статусы задач и кэш ответов LLM."""
+    await request.app.state.redis.flushdb()
+    request.app.state.llm_clients = {}
+    return {
+        "status": "ok",
+        "message": "Redis очищен (задачи и кэш LLM)",
+    }
+
+
+@router.post("/ui/api/admin/flush-qdrant")
+async def flush_qdrant_memory(request: Request) -> dict[str, Any]:
+    """Удаляет коллекцию векторной памяти в Qdrant."""
+    vector_db = request.app.state.vector_db
+    points_before = vector_db.get_points_count()
+    collection_name = vector_db.collection_name
+    removed = vector_db.clear_collection()
+    if removed:
+        message = f"Коллекция «{collection_name}» удалена ({points_before} точек)"
+    else:
+        message = f"Коллекция «{collection_name}» не найдена — уже пусто"
+    return {
+        "status": "ok",
+        "message": message,
+        "collection": collection_name,
+        "points_before": points_before,
+        "removed": removed,
+    }

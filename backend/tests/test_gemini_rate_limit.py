@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 
 from infrastructure.llm.gemini_client import GeminiClient
-from infrastructure.llm.rate_limit import BATCH_SIZE
 
 
 class FakeRedisStorage:

@@ -2,18 +2,60 @@
 
 from __future__ import annotations
 
-BATCH_SIZE = 18
-NORMALIZE_BATCH_SIZE = 8
-REQUEST_DELAY_SECONDS = 4
-RATE_LIMIT_RETRY_SECONDS = 15
-MAX_RETRIES = 3
+import os
+from dataclasses import dataclass
 
 
-def chunk_items(items: list[str], batch_size: int = BATCH_SIZE) -> list[list[str]]:
-    """Разбивает список товаров на батчи по 15–20 позиций."""
+def _env_int(*keys: str, default: int) -> int:
+    for key in keys:
+        raw = os.getenv(key)
+        if raw is not None and str(raw).strip():
+            return int(raw)
+    return default
+
+
+@dataclass(frozen=True)
+class RateLimits:
+    batch_size: int
+    normalize_batch_size: int
+    request_delay_seconds: int
+    rate_limit_retry_seconds: int
+    max_retries: int
+
+
+def read_rate_limits() -> RateLimits:
+    """Лимиты из env (см. .env.example: LLM_*)."""
+    return RateLimits(
+        batch_size=_env_int("LLM_BATCH_SIZE", "GEMINI_BATCH_SIZE", default=18),
+        normalize_batch_size=_env_int("LLM_NORMALIZE_BATCH_SIZE", default=8),
+        request_delay_seconds=_env_int(
+            "LLM_REQUEST_DELAY_SECONDS",
+            "GEMINI_REQUEST_DELAY_SECONDS",
+            default=4,
+        ),
+        rate_limit_retry_seconds=_env_int(
+            "LLM_RATE_LIMIT_RETRY_SECONDS",
+            "GEMINI_RATE_LIMIT_RETRY_SECONDS",
+            default=15,
+        ),
+        max_retries=_env_int("LLM_MAX_RETRIES", "GEMINI_MAX_RETRIES", default=3),
+    )
+
+
+_limits = read_rate_limits()
+BATCH_SIZE = _limits.batch_size
+NORMALIZE_BATCH_SIZE = _limits.normalize_batch_size
+REQUEST_DELAY_SECONDS = _limits.request_delay_seconds
+RATE_LIMIT_RETRY_SECONDS = _limits.rate_limit_retry_seconds
+MAX_RETRIES = _limits.max_retries
+
+
+def chunk_items(items: list[str], batch_size: int | None = None) -> list[list[str]]:
+    """Разбивает список товаров на батчи."""
     if not items:
         return []
-    return [items[idx : idx + batch_size] for idx in range(0, len(items), batch_size)]
+    size = batch_size if batch_size is not None else read_rate_limits().batch_size
+    return [items[idx : idx + size] for idx in range(0, len(items), size)]
 
 
 def is_retriable_llm_error(exc: BaseException) -> bool:

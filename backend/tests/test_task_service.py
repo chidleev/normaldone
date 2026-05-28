@@ -31,7 +31,16 @@ class FakeVectorStorage:
     def find_similar(self, vectors: list[list[float]]) -> list[dict[str, Any] | None]:
         result: list[dict[str, Any] | None] = []
         for idx, _ in enumerate(vectors):
-            result.append({"known": "yes"} if idx == 0 else None)
+            if idx == 0:
+                result.append(
+                    {
+                        "text": "known item",
+                        "cluster_name": "Память",
+                        "attributes": {"бренд": "Test"},
+                    }
+                )
+            else:
+                result.append(None)
         return result
 
 
@@ -97,6 +106,7 @@ def test_clusterize_task_stores_completed_state() -> None:
         assert state is not None
         assert state["status"] == TaskStatus.COMPLETED.value
         assert len(state["result"]["known_items"]) == 1
+        assert state["result"]["known_items"][0]["cluster_name"] == "Память"
         assert len(state["result"]["new_item_clusters"]) == 1
         assert "тип" in state["result"]["new_item_clusters"][0]["attributes"]
         assert state["result"]["new_item_clusters"][0]["category"] == "Тестовая категория"

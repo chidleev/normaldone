@@ -13,17 +13,25 @@ from service.ports.llm import LLMPort
 from service.ports.standardizer import StandardizerPort
 from service.ports.task_store import TaskStorePort
 from service.ports.vector_memory import VectorMemoryPort
+from utils.error_text import sanitize_error_message
 
 logger = logging.getLogger(__name__)
 
 
-async def create_task(task_id: str, task_store: TaskStorePort) -> None:
+async def create_task(
+    task_id: str,
+    task_store: TaskStorePort,
+    *,
+    meta: dict[str, Any] | None = None,
+) -> None:
     """Регистрирует новую задачу со статусом PENDING в Redis."""
     state: dict[str, Any] = {
         "status": TaskStatus.PENDING.value,
         "result": None,
         "error": None,
     }
+    if meta:
+        state.update(meta)
     await task_store.set_task_state(task_id, state)
 
 
@@ -78,13 +86,33 @@ async def clusterize_task(
     clusterizer: ClusterizerPort,
     task_store: TaskStorePort,
 ) -> None:
-    """Выполняет кластеризацию с учетом памяти и атрибутов от Gemini."""
+    """Выполняет кластеризацию с учетом памяти и атрибутов от выбранного LLM."""
+    llm_provider = getattr(llm_client, "provider_name", data.cluster_profile_provider.value)
+    llm_model = getattr(llm_client, "model_name", llm_provider)
+    embed_provider = getattr(vectorizer, "provider_name", data.embedding_provider.value)
+    embed_model = getattr(vectorizer, "model_name", embed_provider)
+    phase = "старт"
     try:
+        await _touch_processing(
+            task_id,
+            task_store,
+            progress=(
+                f"Векторизация ({embed_provider}/{embed_model}): 0/{len(data.items)}"
+            ),
+        )
         await _set_task_state(task_id, task_store, status=TaskStatus.PROCESSING)
+        phase = "векторизация"
         embeddings: list[list[float]] = await asyncio.to_thread(
             vectorizer.get_embeddings,
             data.items,
         )
+        await _touch_processing(
+            task_id,
+            task_store,
+            progress=f"Векторизация ({embed_model}): {len(data.items)}/{len(data.items)}",
+        )
+        phase = "память"
+        await _touch_processing(task_id, task_store, progress="Поиск в памяти…")
         memory_matches: list[dict[str, Any] | None] = await asyncio.to_thread(
             vector_db.find_similar,
             embeddings,
@@ -103,8 +131,23 @@ async def clusterize_task(
                 unknown_items.append(item_name)
                 unknown_vectors.append(item_vector)
             else:
-                known_items.append({"item": item_name, "attributes": item_match})
+                known_items.append(
+                    {
+                        "item": item_name,
+                        "attributes": dict(item_match.get("attributes") or {}),
+                        "cluster_name": str(
+                            item_match.get("cluster_name") or "Память"
+                        ).strip()
+                        or "Память",
+                    }
+                )
 
+        phase = "группировка"
+        await _touch_processing(
+            task_id,
+            task_store,
+            progress=f"Группировка: {len(unknown_items)} новых позиций",
+        )
         new_item_clusters: list[dict[str, Any]] = await asyncio.to_thread(
             clusterizer.clusterize,
             unknown_items,
@@ -112,12 +155,13 @@ async def clusterize_task(
         )
         for cluster_index, cluster in enumerate(new_item_clusters, start=1):
             cluster_items = [str(item) for item in cluster.get("cluster_items", [])]
+            phase = "профиль кластера"
             await _touch_processing(
                 task_id,
                 task_store,
                 progress=(
-                    f"LLM: кластер {cluster_index}/{len(new_item_clusters)} "
-                    f"({len(cluster_items)} товаров)"
+                    f"Профиль ({llm_provider}/{llm_model}): кластер {cluster_index}/"
+                    f"{len(new_item_clusters)} ({len(cluster_items)} товаров)"
                 ),
             )
             cluster_profile: dict[str, Any] = await llm_client.get_cluster_profile(
@@ -148,7 +192,14 @@ async def clusterize_task(
             task_id,
             task_store,
             status=TaskStatus.FAILED,
-            error=str(exc),
+            error=sanitize_error_message(
+                exc,
+                phase=phase,
+                embedding_provider=embed_provider,
+                embedding_model=embed_model,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+            ),
         )
 
 
@@ -161,6 +212,11 @@ async def normalize_task(
 ) -> None:
     """Выполняет батч-нормализацию через Gemini и очистку значений."""
     try:
+        await _touch_processing(
+            task_id,
+            task_store,
+            progress=f"Нормализация: 0/{len(data.clusters)}",
+        )
         await _set_task_state(task_id, task_store, status=TaskStatus.PROCESSING)
         normalized_items: list[dict[str, Any]] = []
         for cluster_index, cluster in enumerate(data.clusters, start=1):
@@ -209,5 +265,5 @@ async def normalize_task(
             task_id,
             task_store,
             status=TaskStatus.FAILED,
-            error=str(exc),
+            error=sanitize_error_message(exc),
         )

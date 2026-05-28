@@ -12,6 +12,8 @@ from google import genai
 class GeminiVectorizer:
     """Адаптер эмбеддингов Gemini с интерфейсом EmbeddingPort."""
 
+    provider_name = "gemini"
+
     def __init__(self) -> None:
         load_dotenv()
         api_key = os.getenv("GEMINI_API_KEY")

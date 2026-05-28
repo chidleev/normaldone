@@ -11,6 +11,8 @@ from sentence_transformers import SentenceTransformer
 class TextVectorizer:
     """Singleton-обертка для модели эмбеддингов."""
 
+    provider_name = "local"
+
     _instance: ClassVar["TextVectorizer | None"] = None
     _initialized: ClassVar[bool] = False
 

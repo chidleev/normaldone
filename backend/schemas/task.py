@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class TaskStatus(str, Enum):
@@ -43,7 +43,8 @@ class ClusterizeRequest(BaseModel):
 
     items: list[str] = Field(..., description="Названия номенклатуры")
     base_attributes: list[str] = Field(
-        ..., description="Обязательные атрибуты от пользователя"
+        default_factory=list,
+        description="Желаемые атрибуты от пользователя (можно пусто)",
     )
     embedding_provider: EmbeddingProvider = Field(
         default=EmbeddingProvider.LOCAL,
@@ -51,6 +52,7 @@ class ClusterizeRequest(BaseModel):
     )
     cluster_profile_provider: ClusterProfileProvider = Field(
         default=ClusterProfileProvider.G4F,
+        validation_alias=AliasChoices("cluster_profile_provider", "profile_provider"),
         description="Провайдер LLM для профиля кластера: g4f|gemini",
     )
 
@@ -88,3 +90,7 @@ class TaskStatusResponse(BaseModel):
     result: dict[str, Any] | None = None
     error: str | None = None
     progress: str | None = None
+    llm_provider: str | None = None
+    embedding_provider: str | None = None
+    llm_model: str | None = None
+    embedding_model: str | None = None

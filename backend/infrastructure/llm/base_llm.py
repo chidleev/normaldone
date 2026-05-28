@@ -5,21 +5,16 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import os
 from collections.abc import Callable, Iterator
 from typing import Any
 
 from pydantic import BaseModel
 
 from infrastructure.llm.rate_limit import (
-    BATCH_SIZE,
-    MAX_RETRIES,
-    NORMALIZE_BATCH_SIZE,
-    RATE_LIMIT_RETRY_SECONDS,
-    REQUEST_DELAY_SECONDS,
     chunk_items,
     is_rate_limit_error,
     is_retriable_llm_error,
+    read_rate_limits,
 )
 from schemas.llm import ClusterAttributesResponse, NormalizeItemsResponse
 from service.ports.cache_store import CacheStorePort
@@ -34,25 +29,12 @@ class BaseLLMClient:
 
     def __init__(self, cache_store: CacheStorePort) -> None:
         self.cache_store = cache_store
-        self.batch_size = int(os.getenv("LLM_BATCH_SIZE", os.getenv("GEMINI_BATCH_SIZE", BATCH_SIZE)))
-        self.request_delay_seconds = int(
-            os.getenv(
-                "LLM_REQUEST_DELAY_SECONDS",
-                os.getenv("GEMINI_REQUEST_DELAY_SECONDS", REQUEST_DELAY_SECONDS),
-            )
-        )
-        self.rate_limit_retry_seconds = int(
-            os.getenv(
-                "LLM_RATE_LIMIT_RETRY_SECONDS",
-                os.getenv("GEMINI_RATE_LIMIT_RETRY_SECONDS", RATE_LIMIT_RETRY_SECONDS),
-            )
-        )
-        self.max_retries = int(
-            os.getenv("LLM_MAX_RETRIES", os.getenv("GEMINI_MAX_RETRIES", MAX_RETRIES))
-        )
-        self.normalize_batch_size = int(
-            os.getenv("LLM_NORMALIZE_BATCH_SIZE", NORMALIZE_BATCH_SIZE)
-        )
+        limits = read_rate_limits()
+        self.batch_size = limits.batch_size
+        self.normalize_batch_size = limits.normalize_batch_size
+        self.request_delay_seconds = limits.request_delay_seconds
+        self.rate_limit_retry_seconds = limits.rate_limit_retry_seconds
+        self.max_retries = limits.max_retries
 
     @staticmethod
     def _build_cache_key(
@@ -172,12 +154,16 @@ class BaseLLMClient:
             return {"category": "Без категории", "attributes": list(base_attrs)}
 
         def build_prompt(batch: list[str]) -> str:
+            if base_attrs:
+                attrs_hint = f"Следующие атрибуты уже учтены пользователем (исключи их из ответа): {base_attrs}\n"
+            else:
+                attrs_hint = "Базовые атрибуты не заданы — предложи полный набор атрибутов самостоятельно.\n"
             return (
-                "Проанализируй список товаров и верни категорию кластера. "
-                "Затем предложи максимально полный список полезных атрибутов, "
+                "Проанализируй список товаров и верни название кластера, которое будет однозначно идентифицировать товары в этом кластере. "
+                "Затем предложи (дополни) максимально полный список необходимых и полезных атрибутов, "
                 "которые можно извлечь из названия товаров или найти через веб-поиск.\n"
                 f"Список товаров: {batch}\n"
-                f"Обязательные базовые атрибуты: {base_attrs}\n"
+                f"{attrs_hint}"
                 'Пример ответа: {"category": "Фильтры топливные", "attributes": '
                 '["бренд", "артикул", "единица измерения", "тип фильтра", "двигатель", "совместимые OEM"]}'
             )

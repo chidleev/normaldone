@@ -12,6 +12,7 @@ class MemoryItem(BaseModel):
 
     text: str = Field(..., description="Название товара")
     attributes: dict[str, Any] = Field(..., description="Заполненные атрибуты товара")
+    cluster_name: str = Field(..., description="Имя кластера из UI")
 
 
 class MemorySaveRequest(BaseModel):

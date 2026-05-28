@@ -12,6 +12,8 @@ _POINT_NAMESPACE = uuid.UUID("a3f2c8e1-5b4d-4e9a-9c7f-1d2e3f4a5b6c")
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 
+_LEGACY_CLUSTER_NAME = "Память"
+
 
 class VectorStorage:
     """Хранилище эмбеддингов и атрибутов товаров в Qdrant."""
@@ -31,15 +33,32 @@ class VectorStorage:
         """Стабильный UUID v5 по нормализованному названию (требование Qdrant)."""
         return str(uuid.uuid5(_POINT_NAMESPACE, text.strip().lower()))
 
+    @staticmethod
+    def _parse_match_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+        """Преобразует payload точки в структуру совпадения для clusterize."""
+        raw_attributes = payload.get("attributes")
+        if not isinstance(raw_attributes, dict) or not raw_attributes:
+            return None
+        cluster_name = str(payload.get("cluster_name") or "").strip() or _LEGACY_CLUSTER_NAME
+        text = str(payload.get("text") or "").strip()
+        return {
+            "text": text,
+            "cluster_name": cluster_name,
+            "attributes": {str(k): v for k, v in raw_attributes.items()},
+        }
+
     def save_items(
         self,
         texts: list[str],
         vectors: list[list[float]],
         attributes: list[dict[str, Any]],
+        cluster_names: list[str] | None = None,
     ) -> None:
-        """Сохраняет товары в коллекцию: эмбеддинги + атрибуты в metadata."""
+        """Сохраняет товары: эмбеддинги + атрибуты + имя кластера в payload."""
         if not (len(texts) == len(vectors) == len(attributes)):
             raise ValueError("texts, vectors и attributes должны быть одной длины")
+        if cluster_names is not None and len(cluster_names) != len(texts):
+            raise ValueError("cluster_names должны быть той же длины, что texts")
         if not texts:
             return
 
@@ -54,12 +73,23 @@ class VectorStorage:
             )
 
         points: list[models.PointStruct] = []
-        for text, vector, item_attributes in zip(texts, vectors, attributes, strict=True):
+        for index, (text, vector, item_attributes) in enumerate(
+            zip(texts, vectors, attributes, strict=True)
+        ):
+            cluster_name = (
+                str(cluster_names[index]).strip()
+                if cluster_names is not None
+                else _LEGACY_CLUSTER_NAME
+            )
             points.append(
                 models.PointStruct(
                     id=self._item_id(text),
                     vector=vector,
-                    payload={"text": text, "attributes": item_attributes},
+                    payload={
+                        "text": text,
+                        "attributes": item_attributes,
+                        "cluster_name": cluster_name or _LEGACY_CLUSTER_NAME,
+                    },
                 )
             )
 
@@ -79,7 +109,7 @@ class VectorStorage:
         threshold — макс. косинусное расстояние (0.15 ≈ similarity >= 0.85).
 
         Возвращает список длиной как вход:
-        - dict с атрибутами при достаточном сходстве,
+        - dict {text, cluster_name, attributes} при достаточном сходстве,
         - None, если совпадение не найдено.
         """
         if not vectors:
@@ -102,11 +132,10 @@ class VectorStorage:
                 continue
 
             payload = result.points[0].payload or {}
-            raw_attributes = payload.get("attributes")
-            if isinstance(raw_attributes, dict) and raw_attributes:
-                matches.append(raw_attributes)
-            else:
+            if not isinstance(payload, dict):
                 matches.append(None)
+                continue
+            matches.append(self._parse_match_payload(payload))
 
         return matches
 
