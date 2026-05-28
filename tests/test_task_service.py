@@ -40,11 +40,11 @@ class FakeClusterizer:
 
 
 class FakeGeminiClient:
-    async def get_cluster_attributes(
+    async def get_cluster_profile(
         self, items: list[str], base_attrs: list[str]
-    ) -> list[str]:
+    ) -> dict[str, Any]:
         _ = (items, base_attrs)
-        return ["тип", "материал"]
+        return {"category": "Тестовая категория", "attributes": ["тип", "материал"]}
 
     async def normalize_items(
         self, items: list[str], attributes: list[str]
@@ -56,9 +56,9 @@ class FakeGeminiClient:
 
 
 class FailingGeminiClient:
-    async def get_cluster_attributes(
+    async def get_cluster_profile(
         self, items: list[str], base_attrs: list[str]
-    ) -> list[str]:
+    ) -> dict[str, Any]:
         _ = (items, base_attrs)
         raise RuntimeError("gemini failure")
 
@@ -82,7 +82,7 @@ def test_clusterize_task_stores_completed_state() -> None:
             data=ClusterizeRequest(items=["known item", "new item"], base_attributes=["бренд"]),
             vectorizer=FakeVectorizer(),
             vector_db=FakeVectorStorage(),
-            gemini_client=FakeGeminiClient(),
+            llm_client=FakeGeminiClient(),
             clusterizer=FakeClusterizer(),
             task_store=redis,
         )
@@ -93,6 +93,7 @@ def test_clusterize_task_stores_completed_state() -> None:
         assert len(state["result"]["known_items"]) == 1
         assert len(state["result"]["new_item_clusters"]) == 1
         assert "тип" in state["result"]["new_item_clusters"][0]["attributes"]
+        assert state["result"]["new_item_clusters"][0]["category"] == "Тестовая категория"
 
     asyncio.run(_run())
 
@@ -108,7 +109,7 @@ def test_clusterize_task_sets_failed_on_exception() -> None:
             data=ClusterizeRequest(items=["a", "b"], base_attributes=["бренд"]),
             vectorizer=FakeVectorizer(),
             vector_db=FakeVectorStorage(),
-            gemini_client=FailingGeminiClient(),
+            llm_client=FailingGeminiClient(),
             clusterizer=FakeClusterizer(),
             task_store=redis,
         )
@@ -140,7 +141,7 @@ def test_normalize_task_applies_standardizer() -> None:
         await normalize_task(
             task_id=task_id,
             data=request,
-            gemini_client=FakeGeminiClient(),
+            llm_client=FakeGeminiClient(),
             standardizer=FakeStandardizer(),
             task_store=redis,
         )

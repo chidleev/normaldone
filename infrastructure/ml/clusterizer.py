@@ -11,7 +11,7 @@ from sklearn.cluster import AgglomerativeClustering
 class ItemClusterizer:
     """Кластеризатор товаров по косинусному расстоянию эмбеддингов."""
 
-    def __init__(self, distance_threshold: float = 0.3) -> None:
+    def __init__(self, distance_threshold: float = 0.2) -> None:
         """Настраивает агломеративную кластеризацию без фиксированного числа групп."""
         self.model = AgglomerativeClustering(
             n_clusters=None,

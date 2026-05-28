@@ -53,7 +53,7 @@ async def clusterize(
         body,
         request.app.state.vectorizer,
         request.app.state.vector_db,
-        request.app.state.gemini_client,
+        request.app.state.llm_client,
         request.app.state.clusterizer,
         request.app.state.redis,
     )
@@ -74,7 +74,7 @@ async def normalize(
         normalize_task,
         task_id,
         body,
-        request.app.state.gemini_client,
+        request.app.state.llm_client,
         request.app.state.standardizer,
         request.app.state.redis,
     )
@@ -97,12 +97,21 @@ async def task_result(task_id: str, request: Request) -> TaskStatusResponse:
 @memory_router.post("/save", response_model=MemorySaveResponse)
 async def save_memory(body: MemorySaveRequest, request: Request) -> MemorySaveResponse:
     """Сохраняет товары с атрибутами в локальную векторную память."""
-    texts: list[str] = [item.text for item in body.items]
-    attributes: list[dict[str, Any]] = [item.attributes for item in body.items]
-    vectors: list[list[float]] = await asyncio.to_thread(
-        request.app.state.vectorizer.get_embeddings,
-        texts,
-    )
-    await asyncio.to_thread(request.app.state.vector_db.save_items, texts, vectors, attributes)
-    logger.info("Saved %s items to vector memory", len(texts))
-    return MemorySaveResponse(saved_count=len(texts))
+    try:
+        texts: list[str] = [item.text for item in body.items]
+        attributes: list[dict[str, Any]] = [item.attributes for item in body.items]
+        vectors: list[list[float]] = await asyncio.to_thread(
+            request.app.state.vectorizer.get_embeddings,
+            texts,
+        )
+        await asyncio.to_thread(
+            request.app.state.vector_db.save_items,
+            texts,
+            vectors,
+            attributes,
+        )
+        logger.info("Saved %s items to vector memory", len(texts))
+        return MemorySaveResponse(saved_count=len(texts))
+    except Exception as exc:
+        logger.exception("Failed to save items to vector memory")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

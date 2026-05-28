@@ -8,11 +8,11 @@ from typing import Any, Protocol
 class LLMPort(Protocol):
     """Контракт взаимодействия с внешней языковой моделью."""
 
-    async def get_cluster_attributes(
+    async def get_cluster_profile(
         self,
         items: list[str],
         base_attrs: list[str],
-    ) -> list[str]: ...
+    ) -> dict[str, Any]: ...
 
     async def normalize_items(
         self,

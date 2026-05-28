@@ -23,7 +23,7 @@ class FakeModels:
     def generate_content(self, **kwargs: Any) -> SimpleNamespace:
         _ = kwargs
         self.calls += 1
-        return SimpleNamespace(text='{"attributes":["бренд","модель"]}')
+        return SimpleNamespace(text='{"category":"Тест","attributes":["бренд","модель"]}')
 
 
 class FakeGenAIClient:
@@ -40,11 +40,12 @@ def test_gemini_client_uses_cache(monkeypatch: Any) -> None:
         redis = FakeRedisStorage()
         client = GeminiClient(redis)
 
-        result1 = await client.get_cluster_attributes(["item-a", "item-b"], ["бренд"])
-        result2 = await client.get_cluster_attributes(["item-a", "item-b"], ["бренд"])
+        result1 = await client.get_cluster_profile(["item-a", "item-b"], ["бренд"])
+        result2 = await client.get_cluster_profile(["item-a", "item-b"], ["бренд"])
 
-        assert result1 == ["бренд", "модель"]
-        assert result2 == ["бренд", "модель"]
+        assert result1["category"] == "Тест"
+        assert "бренд" in result1["attributes"]
+        assert result2["category"] == "Тест"
         assert client.client.models.calls == 1
 
     asyncio.run(_run())

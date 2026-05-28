@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
+import uuid
 from typing import Any
+
+# Namespace для детерминированных UUID точек Qdrant
+_POINT_NAMESPACE = uuid.UUID("a3f2c8e1-5b4d-4e9a-9c7f-1d2e3f4a5b6c")
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
@@ -25,8 +28,8 @@ class VectorStorage:
 
     @staticmethod
     def _item_id(text: str) -> str:
-        """Строит стабильный ID на основе хэша названия товара."""
-        return hashlib.sha256(text.strip().lower().encode("utf-8")).hexdigest()
+        """Стабильный UUID v5 по нормализованному названию (требование Qdrant)."""
+        return str(uuid.uuid5(_POINT_NAMESPACE, text.strip().lower()))
 
     def save_items(
         self,
@@ -42,7 +45,7 @@ class VectorStorage:
 
         vector_size = len(vectors[0])
         if not self.client.collection_exists(self.collection_name):
-            self.client.recreate_collection(
+            self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=models.VectorParams(
                     size=vector_size,
@@ -73,8 +76,10 @@ class VectorStorage:
         """
         Ищет похожие товары по эмбеддингам.
 
+        threshold — макс. косинусное расстояние (0.15 ≈ similarity >= 0.85).
+
         Возвращает список длиной как вход:
-        - dict с сохраненными атрибутами, если расстояние < threshold,
+        - dict с атрибутами при достаточном сходстве,
         - None, если совпадение не найдено.
         """
         if not vectors:
@@ -82,28 +87,44 @@ class VectorStorage:
         if not self.client.collection_exists(self.collection_name):
             return [None for _ in vectors]
 
+        min_similarity = 1.0 - threshold
         matches: list[dict[str, Any] | None] = []
         for vector in vectors:
             result = self.client.query_points(
                 collection_name=self.collection_name,
                 query=vector,
                 limit=1,
+                score_threshold=min_similarity,
                 with_payload=True,
             )
             if not result.points:
                 matches.append(None)
                 continue
 
-            score = float(result.points[0].score or 0.0)
-            distance = 1.0 - score
-            if distance >= threshold:
-                matches.append(None)
-                continue
             payload = result.points[0].payload or {}
             raw_attributes = payload.get("attributes")
-            if isinstance(raw_attributes, dict):
+            if isinstance(raw_attributes, dict) and raw_attributes:
                 matches.append(raw_attributes)
             else:
                 matches.append(None)
 
         return matches
+
+    def get_points_count(self) -> int:
+        """Возвращает число точек в коллекции (0, если коллекции нет)."""
+        if not self.client.collection_exists(self.collection_name):
+            return 0
+        info = self.client.get_collection(self.collection_name)
+        return int(info.points_count or 0)
+
+    def clear_collection(self) -> bool:
+        """
+        Удаляет коллекцию векторной памяти.
+
+        Returns:
+            True, если коллекция существовала и была удалена.
+        """
+        if not self.client.collection_exists(self.collection_name):
+            return False
+        self.client.delete_collection(self.collection_name)
+        return True

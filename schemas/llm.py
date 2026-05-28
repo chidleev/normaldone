@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 class ClusterAttributesResponse(BaseModel):
     """Структура ответа для подбора атрибутов кластера."""
 
+    category: str = Field(default="Без категории")
     attributes: list[str] = Field(default_factory=list)
 
 

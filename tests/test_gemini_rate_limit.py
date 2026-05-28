@@ -1,10 +1,13 @@
 import asyncio
+import ast
+import re
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from infrastructure.llm.gemini_client import BATCH_SIZE, GeminiClient
+from infrastructure.llm.gemini_client import GeminiClient
+from infrastructure.llm.rate_limit import BATCH_SIZE
 
 
 class FakeRedisStorage:
@@ -24,12 +27,27 @@ class FakeModels:
         self.fail_times = fail_times
 
     def generate_content(self, **kwargs: Any) -> SimpleNamespace:
-        _ = kwargs
+        prompt = str(kwargs.get("contents", ""))
         self.calls += 1
         if self.calls <= self.fail_times:
             raise RuntimeError("429 Too Many Requests")
+        items: list[str] = ["x"]
+        if "Товары:\n" in prompt:
+            tail = prompt.split("Товары:\n", 1)[1]
+            numbered_lines = re.findall(r"^\d+\.\s*(.+)$", tail, flags=re.MULTILINE)
+            if numbered_lines:
+                items = [line.strip() for line in numbered_lines if line.strip()]
+        elif "Товары:" in prompt:
+            tail = prompt.split("Товары:", 1)[1].split("\n", 1)[0].strip()
+            try:
+                parsed = ast.literal_eval(tail)
+                if isinstance(parsed, list) and parsed:
+                    items = [str(value) for value in parsed]
+            except (SyntaxError, ValueError):
+                pass
+        normalized = [{"item": item, "values": {"вес": "1 кг"}} for item in items]
         return SimpleNamespace(
-            text='{"normalized":[{"item":"x","values":{"вес":"1 кг"}}]}'
+            text=str({"normalized": normalized}).replace("'", '"')
         )
 
 
@@ -52,12 +70,12 @@ def test_normalize_items_splits_into_batches(monkeypatch: Any) -> None:
 
     async def _run() -> None:
         client = GeminiClient(FakeRedisStorage())
-        items = [f"item-{idx}" for idx in range(BATCH_SIZE + 5)]
+        items = [f"item-{idx}" for idx in range(client.normalize_batch_size * 2 + 1)]
         result = await client.normalize_items(items, ["вес"])
 
-        assert len(result) == 2
-        assert client.client.models.calls == 2
-        assert sleeps == [client.request_delay_seconds]
+        assert len(result) == len(items)
+        assert client.client.models.calls == 3
+        assert sleeps == [client.request_delay_seconds, client.request_delay_seconds]
 
     asyncio.run(_run())
 

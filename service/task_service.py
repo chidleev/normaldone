@@ -74,7 +74,7 @@ async def clusterize_task(
     data: ClusterizeRequest,
     vectorizer: EmbeddingPort,
     vector_db: VectorMemoryPort,
-    gemini_client: LLMPort,
+    llm_client: LLMPort,
     clusterizer: ClusterizerPort,
     task_store: TaskStorePort,
 ) -> None:
@@ -116,18 +116,16 @@ async def clusterize_task(
                 task_id,
                 task_store,
                 progress=(
-                    f"Gemini: кластер {cluster_index}/{len(new_item_clusters)} "
+                    f"LLM: кластер {cluster_index}/{len(new_item_clusters)} "
                     f"({len(cluster_items)} товаров)"
                 ),
             )
-            cluster_specific_attrs: list[str] = await gemini_client.get_cluster_attributes(
+            cluster_profile: dict[str, Any] = await llm_client.get_cluster_profile(
                 cluster_items,
                 data.base_attributes,
             )
-            combined_attributes = list(
-                dict.fromkeys(data.base_attributes + cluster_specific_attrs)
-            )
-            cluster["attributes"] = combined_attributes
+            cluster["category"] = str(cluster_profile.get("category", "Без категории"))
+            cluster["attributes"] = list(cluster_profile.get("attributes", data.base_attributes))
 
         result_payload: dict[str, Any] = {
             "embeddings_count": len(embeddings),
@@ -157,7 +155,7 @@ async def clusterize_task(
 async def normalize_task(
     task_id: str,
     data: NormalizeRequest,
-    gemini_client: LLMPort,
+    llm_client: LLMPort,
     standardizer: StandardizerPort,
     task_store: TaskStorePort,
 ) -> None:
@@ -170,24 +168,32 @@ async def normalize_task(
                 task_id,
                 task_store,
                 progress=(
-                    f"Gemini: нормализация кластера {cluster_index}/{len(data.clusters)} "
+                    f"LLM: нормализация кластера {cluster_index}/{len(data.clusters)} "
                     f"({len(cluster.items)} товаров)"
                 ),
             )
-            batch_result: list[dict[str, Any]] = await gemini_client.normalize_items(
+            batch_result: list[dict[str, Any]] = await llm_client.normalize_items(
                 cluster.items,
                 cluster.attributes,
             )
             for normalized_entry in batch_result:
+                item_name = str(normalized_entry.get("item", "")).strip()
+                if not item_name:
+                    logger.warning("Skip normalized entry without item field: %s", normalized_entry)
+                    continue
                 values_raw: dict[str, Any] = dict(normalized_entry.get("values", {}))
                 standardized_values = standardizer.process_item(
                     {k: str(v) for k, v in values_raw.items()}
                 )
-                normalized_entry["values"] = standardized_values
-                normalized_items.append(normalized_entry)
+                normalized_items.append(
+                    {"item": item_name, "values": standardized_values}
+                )
+        expected_total = sum(len(cluster.items) for cluster in data.clusters)
         result_payload: dict[str, Any] = {
             "normalized": normalized_items,
-            "message": "Normalization completed with Gemini",
+            "expected_count": expected_total,
+            "actual_count": len(normalized_items),
+            "message": "Normalization completed",
         }
         await _set_task_state(
             task_id,

@@ -27,3 +27,11 @@ app.add_middleware(
 )
 app.include_router(router)
 app.include_router(memory_router)
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    """Проверка готовности API после загрузки моделей."""
+    from infrastructure.llm.factory import get_llm_provider
+
+    return {"status": "ok", "llm_provider": get_llm_provider()}

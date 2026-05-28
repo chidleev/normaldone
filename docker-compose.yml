@@ -36,6 +36,8 @@ services:
     env_file:
       - .env
     environment:
+      LLM_PROVIDER: g4f
+      G4F_MODEL: gpt-4
       REDIS_URL: redis://redis:6379/0
       QDRANT_URL: http://qdrant:6333
     ports:
