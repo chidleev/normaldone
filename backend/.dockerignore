@@ -3,21 +3,14 @@ __pycache__/
 *.pyo
 *.pyd
 
-.git/
-.gitignore
-
 .venv/
 venv/
 env/
 
 .env
-
-qdrant_data/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 
-tests/
+qdrant_data/
 tickets/
-frontend/node_modules/
-frontend/dist/

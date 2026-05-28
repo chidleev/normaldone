@@ -9,9 +9,12 @@ from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
+from infrastructure.llm.factory import create_llm_client, resolve_llm_provider
+from infrastructure.ml.gemini_vectorizer import GeminiVectorizer
 from schemas.memory import MemorySaveRequest, MemorySaveResponse
 from schemas.task import (
     ClusterizeRequest,
+    EmbeddingProvider,
     NormalizeRequest,
     TaskCreateResponse,
     TaskStatus,
@@ -38,6 +41,42 @@ async def _task_response(task_id: str, request: Request) -> TaskStatusResponse:
     )
 
 
+def _get_llm_client(request: Request, provider_raw: str):
+    """Возвращает LLM-клиент для выбранного провайдера с lazy-кэшированием."""
+    try:
+        provider = resolve_llm_provider(provider_raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    clients = getattr(request.app.state, "llm_clients", {})
+    client = clients.get(provider)
+    if client is None:
+        client = create_llm_client(request.app.state.redis, provider)
+        clients[provider] = client
+        request.app.state.llm_clients = clients
+        logger.info("Initialized LLM client for provider=%s", provider)
+    return provider, client
+
+
+def _get_embedding_client(request: Request, provider: EmbeddingProvider):
+    """Возвращает эмбеддер для выбранного провайдера с lazy-кэшированием."""
+    provider_name = provider.value
+    clients = getattr(request.app.state, "embedding_clients", {})
+    client = clients.get(provider_name)
+    if client is None:
+        try:
+            if provider == EmbeddingProvider.GEMINI:
+                client = GeminiVectorizer()
+            else:
+                client = request.app.state.vectorizer
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        clients[provider_name] = client
+        request.app.state.embedding_clients = clients
+        logger.info("Initialized embedding provider=%s", provider_name)
+    return provider_name, client
+
+
 @router.post("/clusterize", response_model=TaskCreateResponse)
 async def clusterize(
     body: ClusterizeRequest,
@@ -45,19 +84,32 @@ async def clusterize(
     request: Request,
 ) -> TaskCreateResponse:
     """Ставит задачу кластеризации в очередь и запускает обработчик."""
+    embedding_provider, embedding_client = _get_embedding_client(
+        request,
+        body.embedding_provider,
+    )
+    llm_provider, llm_client = _get_llm_client(
+        request,
+        body.cluster_profile_provider.value,
+    )
     task_id = str(uuid.uuid4())
     await create_task(task_id, request.app.state.redis)
     background_tasks.add_task(
         clusterize_task,
         task_id,
         body,
-        request.app.state.vectorizer,
+        embedding_client,
         request.app.state.vector_db,
-        request.app.state.llm_client,
+        llm_client,
         request.app.state.clusterizer,
         request.app.state.redis,
     )
-    logger.info("Clusterize task %s created", task_id)
+    logger.info(
+        "Clusterize task %s created with embedding=%s, llm=%s",
+        task_id,
+        embedding_provider,
+        llm_provider,
+    )
     return TaskCreateResponse(task_id=task_id, status=TaskStatus.PENDING.value)
 
 
@@ -68,17 +120,18 @@ async def normalize(
     request: Request,
 ) -> TaskCreateResponse:
     """Ставит задачу нормализации в очередь и запускает обработчик."""
+    provider, llm_client = _get_llm_client(request, body.llm_provider.value)
     task_id = str(uuid.uuid4())
     await create_task(task_id, request.app.state.redis)
     background_tasks.add_task(
         normalize_task,
         task_id,
         body,
-        request.app.state.llm_client,
+        llm_client,
         request.app.state.standardizer,
         request.app.state.redis,
     )
-    logger.info("Normalize task %s created", task_id)
+    logger.info("Normalize task %s created with provider=%s", task_id, provider)
     return TaskCreateResponse(task_id=task_id, status=TaskStatus.PENDING.value)
 
 

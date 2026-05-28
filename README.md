@@ -5,7 +5,7 @@ FastAPI-сервер для кластеризации и нормализаци
 - локальной векторизацией (`sentence-transformers`),
 - локальной векторной памятью (`Qdrant`),
 - кэшированием и статусами задач в `Redis`,
-- LLM-нормализацией через **g4f (GPT-4 по умолчанию)** или `Gemini` (`LLM_PROVIDER`).
+- LLM-нормализацией через `g4f` или `Gemini` (провайдер передается в API-запросе).
 
 ## Быстрый старт (Docker)
 
@@ -15,8 +15,8 @@ FastAPI-сервер для кластеризации и нормализаци
 cp .env.example .env
 ```
 
-1. Скопируйте `.env.example` → `.env` (по умолчанию `LLM_PROVIDER=g4f`, ключ Gemini не нужен).
-   Для Gemini: `LLM_PROVIDER=gemini` и `GEMINI_API_KEY`.
+1. Скопируйте `.env.example` → `.env`.
+   Для Gemini укажите `GEMINI_API_KEY`.
 
 1. Запустите сервисы:
 
@@ -35,8 +35,8 @@ docker-compose up -d --build
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn main:app --reload
+pip install -r backend/requirements.txt
+uvicorn backend.main:app --reload
 ```
 
 ## Полезные команды
@@ -44,51 +44,39 @@ uvicorn main:app --reload
 - Тесты:
 
 ```bash
-pytest -q
+pytest -q backend/tests
 ```
 
 - Очистка Redis (кэш LLM и статусы задач):
 
 ```bash
-python scripts/flush_redis_cache.py --yes
+python backend/scripts/flush_redis_cache.py --yes
 ```
 
 - Очистка векторной памяти Qdrant (если все товары попадают в `known_items`):
 
 ```bash
-python scripts/flush_qdrant_memory.py --yes
+python backend/scripts/flush_qdrant_memory.py --yes
 ```
 
 Полный сброс тома Qdrant в Docker: `docker compose down -v` (удалит все данные Qdrant).
 
-- E2E-проверка полного флоу на боевом API:
+## UI (Vite, отдельный контейнер)
 
-```bash
-# Дождитесь в логах: "Application startup complete"
-python scripts/e2e_flow_check.py
-```
+UI вынесен в отдельный Vite-frontend контейнер и открывается по адресу:
 
-Скрипт сам ждёт `GET /health` (при первом запуске Docker модель грузится 2–5 мин).
-После нормализации сохраняет `e2e_clusters.xlsx` (один лист = один кластер).
+- `http://localhost:5173`
 
-Свой путь для Excel:
+Backend API остается на `http://localhost:8000`, фронт проксирует нужные маршруты.
 
-```bash
-python scripts/e2e_flow_check.py --excel-out reports/result.xlsx
-```
+UI покрывает этапы:
 
-Свои товары:
-
-```bash
-python scripts/e2e_flow_check.py --items-file my_items.json
-```
-my_items.json:
-```JSON
-{
-  "base_attributes": ["бренд", "артикул", "единица измерения"],
-  "items": ["Товар 1", "Товар 2", "Товар 3"]
-}
-```
+- загрузка CSV/XLSX, очистка пустых строк и точных дубликатов;
+- запуск `clusterize` в фоне + автоопрос статуса;
+- ручная правка кластеров через вкладки/таблицы;
+- запуск `normalize` + автоопрос статуса;
+- сохранение подтвержденных данных в память (`/api/v1/memory/save`);
+- выгрузка результата в Excel (`.xlsx`, один лист = один кластер).
 
 ## Основные эндпоинты
 

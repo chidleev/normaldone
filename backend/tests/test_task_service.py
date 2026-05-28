@@ -1,7 +1,13 @@
 import asyncio
 from typing import Any
 
-from schemas.task import ClusterInput, ClusterizeRequest, NormalizeRequest, TaskStatus
+from schemas.task import (
+    ClusterInput,
+    ClusterizeRequest,
+    NormalizeProvider,
+    NormalizeRequest,
+    TaskStatus,
+)
 from service.task_service import clusterize_task, create_task, get_task, normalize_task
 
 
@@ -135,7 +141,8 @@ def test_normalize_task_applies_standardizer() -> None:
                     attributes=["вес", "длина"],
                     items=["item-1", "item-2"],
                 )
-            ]
+            ],
+            llm_provider=NormalizeProvider.G4F,
         )
 
         await normalize_task(
