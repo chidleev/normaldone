@@ -14,6 +14,7 @@ class VectorMemoryPort(Protocol):
         vectors: list[list[float]],
         attributes: list[dict[str, Any]],
         cluster_names: list[str] | None = None,
+        original_items_list: list[list[str]] | None = None,
     ) -> None: ...
 
     def find_similar(

@@ -3,6 +3,7 @@ import {
   Database,
   Download,
   Eraser,
+  FlaskConical,
   Layers,
   RotateCcw,
   Save,
@@ -29,6 +30,7 @@ const emit = defineEmits([
   "export-xlsx",
   "flush-redis",
   "flush-qdrant",
+  "load-test-cluster",
 ]);
 </script>
 
@@ -83,6 +85,15 @@ const emit = defineEmits([
       <button class="btn-with-icon" type="button" @click="emit('normalize')">
         <Sparkles aria-hidden="true" />
         Нормализовать
+      </button>
+      <button
+        class="btn-with-icon btn-with-icon--secondary"
+        type="button"
+        title="Загрузить демо-кластер с обогащёнными именами для проверки UI"
+        @click="emit('load-test-cluster')"
+      >
+        <FlaskConical aria-hidden="true" />
+        Тестовый кластер
       </button>
       <IconButton title="Сохранить в память" @click="emit('save-memory')">
         <Save aria-hidden="true" />

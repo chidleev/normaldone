@@ -131,6 +131,7 @@ async def dispatch_normalize(
         body,
         llm_client,
         request.app.state.standardizer,
+        request.app.state.vectorizer,
         request.app.state.redis,
     )
     logger.info("Normalize task %s created with provider=%s", task_id, provider)
@@ -150,6 +151,9 @@ async def dispatch_memory_save(
         texts: list[str] = [item.text for item in body.items]
         attributes: list[dict[str, Any]] = [item.attributes for item in body.items]
         cluster_names: list[str] = [item.cluster_name for item in body.items]
+        original_items_list: list[list[str]] = [
+            list(item.original_items or []) for item in body.items
+        ]
         try:
             provider = EmbeddingProvider(embedding_provider.strip().lower())
         except ValueError as exc:
@@ -165,6 +169,7 @@ async def dispatch_memory_save(
             vectors,
             attributes,
             cluster_names,
+            original_items_list,
         )
         logger.info("Saved %s items to vector memory", len(texts))
         return MemorySaveResponse(saved_count=len(texts))

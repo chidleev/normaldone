@@ -4,13 +4,21 @@ import {
   CheckSquare,
   ChevronLeft,
   ChevronRight,
+  Database,
   Plus,
+  Sparkles,
   Square,
   Star,
   Trash2,
 } from "@lucide/vue";
 import IconButton from "./IconButton.vue";
 import MoveClusterMenu from "./MoveClusterMenu.vue";
+import NomenclatureAliasesMenu from "./NomenclatureAliasesMenu.vue";
+import DraftTextInput from "./DraftTextInput.vue";
+import ClusterRowMenu from "./ClusterRowMenu.vue";
+import AttributeMergeMenu from "./AttributeMergeMenu.vue";
+import PriorityValueMenu from "./PriorityValueMenu.vue";
+import { ENRICHED_NAME_COLUMN, NOMENCLATURE_COLUMN } from "../utils/clusterTable";
 
 const props = defineProps({
   mode: { type: String, default: "source" },
@@ -32,6 +40,14 @@ const emit = defineEmits([
   "add-row-form",
   "delete-row",
   "move-row",
+  "rename-title",
+  "update-template",
+  "set-attribute-merge-config",
+  "regenerate-row",
+  "regenerate-all",
+  "split-alias",
+  "merge-row-into",
+  "rededupe",
   "notify",
 ]);
 
@@ -47,6 +63,8 @@ const isDragActive = ref(false);
 const addRowCells = ref({});
 const hoveredColumn = ref(null);
 const columnLongestCache = reactive({});
+const clusterTitleLongest = ref("");
+const clusterTemplateLongest = ref("");
 
 function rememberColumnText(header, text) {
   const key = String(header ?? "").trim();
@@ -90,12 +108,21 @@ watch(
   { deep: true },
 );
 
+function dataSourceTitle(dataSource) {
+  if (dataSource === "memory") {
+    return "Источник: векторная память (Qdrant)";
+  }
+  return "Источник: ИИ (кластеризация / нормализация)";
+}
+
 function emptyTable() {
   return {
     title: "",
     headers: [],
     selectedColumn: "",
     disabledColumns: [],
+    enrichedNameTemplate: "",
+    useEnrichedNames: false,
     rows: [],
     page: 1,
     totalPages: 1,
@@ -247,6 +274,125 @@ const sectionTitle = computed(() => {
   return isSource.value ? "Исходные данные" : "Кластер";
 });
 
+watch(
+  () => (isCluster.value ? tableData.value.title : ""),
+  (title) => {
+    const text = String(title ?? "").trim();
+    if (text.length > clusterTitleLongest.value.length) {
+      clusterTitleLongest.value = text;
+    }
+  },
+  { immediate: true },
+);
+
+function clusterTitleSizerText(current = "") {
+  const placeholder = "Название кластера";
+  const cached = clusterTitleLongest.value;
+  const value = String(current ?? "");
+  let longest = cached.length >= placeholder.length ? cached : placeholder;
+  if (value.length > longest.length) longest = value;
+  return longest || "\u00a0";
+}
+
+function noteClusterTitleInput(event) {
+  const text = String(event.target.value ?? "");
+  if (text.length > clusterTitleLongest.value.length) {
+    clusterTitleLongest.value = text;
+  }
+}
+
+function onClusterTitleCommit(value) {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed) {
+    emit("notify", { text: "Введите название кластера", tone: "err" });
+    return;
+  }
+  clusterTitleLongest.value = trimmed;
+  emit("rename-title", trimmed);
+}
+
+watch(
+  () => (isCluster.value ? tableData.value.enrichedNameTemplate : ""),
+  (template) => {
+    const text = String(template ?? "").trim();
+    if (text.length > clusterTemplateLongest.value.length) {
+      clusterTemplateLongest.value = text;
+    }
+  },
+  { immediate: true },
+);
+
+function clusterTemplateSizerText(current = "") {
+  const placeholder = "Шаблон: {бренд} фильтр {артикул}";
+  const cached = clusterTemplateLongest.value;
+  const value = String(current ?? "");
+  let longest = cached.length >= placeholder.length ? cached : placeholder;
+  if (value.length > longest.length) longest = value;
+  return longest || "\u00a0";
+}
+
+function noteClusterTemplateInput(event) {
+  const text = String(event.target.value ?? "");
+  if (text.length > clusterTemplateLongest.value.length) {
+    clusterTemplateLongest.value = text;
+  }
+}
+
+function onClusterTemplateCommit(value) {
+  const trimmed = String(value ?? "").trim();
+  clusterTemplateLongest.value = trimmed || clusterTemplateLongest.value;
+  emit("update-template", trimmed);
+}
+
+function onRowCellCommit(rowIndex, header, value) {
+  emit("row-edit", { rowIndex, header, value: String(value ?? "") });
+}
+
+function mergeTargetsForRow(rowIndex) {
+  return (tableData.value.rows || [])
+    .filter((row) => row.row_index !== rowIndex)
+    .map((row) => ({
+      index: row.row_index,
+      label: String(row.cells?.[sourceColumn.value] || "").trim() || `Строка ${row.row_index + 1}`,
+    }))
+    .filter((target) => target.label);
+}
+
+function attributeMergeBehavior(header) {
+  const map = tableData.value.attributeMerge || {};
+  return map[header] === "accumulative" ? "accumulative" : "priority";
+}
+
+function attributeMergeSeparator(header) {
+  const map = tableData.value.attributeMergeSeparators || {};
+  return String(map[header] || map[String(header).toLowerCase()] || "");
+}
+
+function priorityConflictValues(row, header) {
+  if (!isCluster.value || !showEnrichedNames.value) return [];
+  if (attributeMergeBehavior(header) !== "priority") return [];
+  const values = [];
+  for (const member of row.members || []) {
+    const value = String(member.values?.[header] ?? "").trim();
+    if (value && !values.includes(value)) {
+      values.push(value);
+    }
+  }
+  const current = String(row.cells?.[header] ?? "").trim();
+  if (current && !values.includes(current)) {
+    values.unshift(current);
+  }
+  return values.length > 1 ? values : [];
+}
+
+function onColumnRenameCommit(oldName, value) {
+  emit("rename-column", { oldName, newName: String(value ?? "") });
+}
+
+const showEnrichedNames = computed(
+  () => isCluster.value && Boolean(tableData.value.useEnrichedNames),
+);
+
 const sourceColumn = computed(() => {
   const headers = tableData.value.headers || [];
   const selected = tableData.value.selectedColumn;
@@ -267,7 +413,31 @@ const attributeHeaders = computed(() =>
   >
     <div class="table-header">
       <div class="table-meta">
-        <h3>{{ sectionTitle }}</h3>
+        <h3 v-if="isSource">{{ sectionTitle }}</h3>
+        <DraftTextInput
+          v-else
+          class="cluster-title-edit"
+          input-class="cell-edit cluster-title-input"
+          :model-value="tableData.title || ''"
+          :allow-empty="false"
+          @commit="onClusterTitleCommit"
+        >
+          <template #sizer="{ text }">
+            <span class="cell-field-sizer" aria-hidden="true">{{ clusterTitleSizerText(text) }}</span>
+          </template>
+        </DraftTextInput>
+        <DraftTextInput
+          v-if="isCluster"
+          class="cluster-template-edit"
+          input-class="cell-edit cluster-template-input"
+          :model-value="tableData.enrichedNameTemplate || ''"
+          placeholder="Шаблон: {бренд} фильтр {артикул}"
+          @commit="onClusterTemplateCommit"
+        >
+          <template #sizer="{ text }">
+            <span class="cell-field-sizer" aria-hidden="true">{{ clusterTemplateSizerText(text) }}</span>
+          </template>
+        </DraftTextInput>
         <div v-if="isSource" class="meta-line">
           <span
             >Страница {{ tableData.page }} из {{ tableData.totalPages }} · Всего строк:
@@ -290,8 +460,16 @@ const attributeHeaders = computed(() =>
             </IconButton>
           </span>
         </div>
-        <div v-else class="meta-line">
+        <div v-else class="meta-line cluster-meta-actions">
           <span>Строк: {{ tableData.totalRows }}</span>
+          <template v-if="showEnrichedNames">
+            <button type="button" class="btn-link" @click="emit('regenerate-all')">
+              Пересоздать имена для всех
+            </button>
+            <button type="button" class="btn-link" @click="emit('rededupe')">
+              Пересчитать дубликаты
+            </button>
+          </template>
         </div>
       </div>
     </div>
@@ -376,6 +554,13 @@ const attributeHeaders = computed(() =>
                   <Square v-if="disabledSet.has(header)" aria-hidden="true" />
                   <CheckSquare v-else aria-hidden="true" />
                 </IconButton>
+                <AttributeMergeMenu
+                  v-if="isCluster && showEnrichedNames"
+                  :attribute="header"
+                  :behavior="attributeMergeBehavior(header)"
+                  :separator="attributeMergeSeparator(header)"
+                  @update-config="(payload) => emit('set-attribute-merge-config', payload)"
+                />
                 <IconButton
                   title="Удалить столбец"
                   danger
@@ -400,23 +585,18 @@ const attributeHeaders = computed(() =>
               ]"
             >
               <div class="col-head">
-                <div class="cell-field-box">
-                  <span class="cell-field-sizer" aria-hidden="true">{{
-                    fieldSizerText(sourceColumn, sourceColumn)
-                  }}</span>
-                  <input
-                    class="cell-edit col-input"
-                    type="text"
-                    :value="sourceColumn"
-                    @input="noteCellInput(sourceColumn, $event)"
-                    @change="
-                      emit('rename-column', {
-                        oldName: sourceColumn,
-                        newName: $event.target.value,
-                      })
-                    "
-                  />
-                </div>
+                <DraftTextInput
+                  class="cell-field-box"
+                  input-class="cell-edit col-input"
+                  :model-value="sourceColumn"
+                  @commit="(value) => onColumnRenameCommit(sourceColumn, value)"
+                >
+                  <template #sizer="{ text }">
+                    <span class="cell-field-sizer" aria-hidden="true">{{
+                      fieldSizerText(sourceColumn, text)
+                    }}</span>
+                  </template>
+                </DraftTextInput>
               </div>
             </th>
             <th class="col-add-column col-head-cell">
@@ -444,18 +624,18 @@ const attributeHeaders = computed(() =>
               ]"
             >
               <div class="col-head">
-                <div class="cell-field-box">
-                  <span class="cell-field-sizer" aria-hidden="true">{{
-                    fieldSizerText(header, header)
-                  }}</span>
-                  <input
-                    class="cell-edit col-input"
-                    type="text"
-                    :value="header"
-                    @input="noteCellInput(header, $event)"
-                    @change="emit('rename-column', { oldName: header, newName: $event.target.value })"
-                  />
-                </div>
+                <DraftTextInput
+                  class="cell-field-box"
+                  input-class="cell-edit col-input"
+                  :model-value="header"
+                  @commit="(value) => onColumnRenameCommit(header, value)"
+                >
+                  <template #sizer="{ text }">
+                    <span class="cell-field-sizer" aria-hidden="true">{{
+                      fieldSizerText(header, text)
+                    }}</span>
+                  </template>
+                </DraftTextInput>
               </div>
             </th>
           </tr>
@@ -480,6 +660,7 @@ const attributeHeaders = computed(() =>
                   :value="addRowCells[sourceColumn] || ''"
                   @input="onAddRowCellInput(sourceColumn, $event)"
                   placeholder="Новая номенклатура"
+                  @keydown.enter.prevent="submitAddRowForm"
                 />
               </div>
             </td>
@@ -501,6 +682,7 @@ const attributeHeaders = computed(() =>
                   type="text"
                   :value="addRowCells[header] || ''"
                   @input="onAddRowCellInput(header, $event)"
+                  @keydown.enter.prevent="submitAddRowForm"
                 />
               </div>
             </td>
@@ -511,8 +693,19 @@ const attributeHeaders = computed(() =>
                 <IconButton title="Удалить строку" danger @click="emit('delete-row', row.row_index)">
                   <Trash2 aria-hidden="true" />
                 </IconButton>
+                <ClusterRowMenu
+                  v-if="isCluster && showEnrichedNames"
+                  :aliases="row.aliases"
+                  :merge-targets="mergeTargetsForRow(row.row_index)"
+                  @regenerate="emit('regenerate-row', row.row_index)"
+                  @split-alias="(alias) => emit('split-alias', { rowIndex: row.row_index, alias })"
+                  @merge-into="
+                    (targetIndex) =>
+                      emit('merge-row-into', { sourceIndex: row.row_index, targetIndex })
+                  "
+                />
                 <MoveClusterMenu
-                  v-if="isCluster"
+                  v-else-if="isCluster"
                   :targets="moveTargets"
                   @select="(targetClusterIdx) => onMoveRow(row.row_index, targetClusterIdx)"
                 />
@@ -539,29 +732,75 @@ const attributeHeaders = computed(() =>
                 { 'cell-field': isCellEditable(sourceColumn) },
               ]"
             >
-              <div v-if="isCellEditable(sourceColumn)" class="cell-field-box">
-                <span class="cell-field-sizer" aria-hidden="true">{{
-                  fieldSizerText(sourceColumn, row.cells?.[sourceColumn])
-                }}</span>
-                <input
-                  class="cell-edit"
-                  type="text"
-                  :value="String(row.cells?.[sourceColumn] ?? '')"
-                  @input="noteCellInput(sourceColumn, $event)"
-                  @change="
-                    emit('row-edit', {
-                      rowIndex: row.row_index,
-                      header: sourceColumn,
-                      value: $event.target.value,
-                    })
-                  "
+              <div
+                v-if="isCellEditable(sourceColumn)"
+                class="cell-field-box"
+                :class="{
+                  'cell-field-box--with-source': isCluster,
+                  'cell-field-box--with-aliases': isCluster && showEnrichedNames,
+                }"
+              >
+                <NomenclatureAliasesMenu
+                  v-if="isCluster && showEnrichedNames"
+                  :aliases="row.aliases"
                 />
+                <span
+                  v-if="isCluster && row.dataSource"
+                  class="row-source-icon"
+                  :title="dataSourceTitle(row.dataSource)"
+                >
+                  <Database
+                    v-if="row.dataSource === 'memory'"
+                    class="row-source-icon__svg"
+                    aria-hidden="true"
+                  />
+                  <Sparkles v-else class="row-source-icon__svg" aria-hidden="true" />
+                </span>
+                <DraftTextInput
+                  class="cell-field-inner"
+                  input-class="cell-edit"
+                  :model-value="String(row.cells?.[sourceColumn] ?? '')"
+                  @commit="(value) => onRowCellCommit(row.row_index, sourceColumn, value)"
+                >
+                  <template #sizer="{ text }">
+                    <span class="cell-field-sizer" aria-hidden="true">{{
+                      fieldSizerText(sourceColumn, text)
+                    }}</span>
+                  </template>
+                </DraftTextInput>
               </div>
-              <div v-else class="cell-field-box cell-field-box--static">
-                <span class="cell-field-sizer" aria-hidden="true">{{
-                  fieldSizerText(sourceColumn, row.cells?.[sourceColumn])
-                }}</span>
-                <span class="cell-static-text">{{ String(row.cells?.[sourceColumn] ?? "") }}</span>
+              <div
+                v-else
+                class="cell-field-box cell-field-box--static"
+                :class="{
+                  'cell-field-box--with-source': isCluster && row.dataSource,
+                  'cell-field-box--with-aliases': isCluster && showEnrichedNames,
+                }"
+              >
+                <NomenclatureAliasesMenu
+                  v-if="isCluster && showEnrichedNames"
+                  :aliases="row.aliases"
+                />
+                <span
+                  v-if="isCluster && row.dataSource"
+                  class="row-source-icon"
+                  :title="dataSourceTitle(row.dataSource)"
+                >
+                  <Database
+                    v-if="row.dataSource === 'memory'"
+                    class="row-source-icon__svg"
+                    aria-hidden="true"
+                  />
+                  <Sparkles v-else class="row-source-icon__svg" aria-hidden="true" />
+                </span>
+                <div class="cell-field-inner">
+                  <span class="cell-field-sizer" aria-hidden="true">{{
+                    fieldSizerText(sourceColumn, row.cells?.[sourceColumn])
+                  }}</span>
+                  <span class="cell-static-text">{{
+                    String(row.cells?.[sourceColumn] ?? "")
+                  }}</span>
+                </div>
               </div>
             </td>
             <td class="col-add-column cell-inert" />
@@ -574,22 +813,31 @@ const attributeHeaders = computed(() =>
                 { 'cell-field': isCellEditable(header) },
               ]"
             >
-              <div v-if="isCellEditable(header)" class="cell-field-box">
-                <span class="cell-field-sizer" aria-hidden="true">{{
-                  fieldSizerText(header, row.cells?.[header])
-                }}</span>
-                <input
-                  class="cell-edit"
-                  type="text"
-                  :value="String(row.cells?.[header] ?? '')"
-                  @input="noteCellInput(header, $event)"
-                  @change="
-                    emit('row-edit', {
-                      rowIndex: row.row_index,
-                      header,
-                      value: $event.target.value,
-                    })
-                  "
+              <div
+                v-if="isCellEditable(header)"
+                class="cell-field-box"
+                :class="{
+                  'cell-field-box--with-priority-conflict':
+                    priorityConflictValues(row, header).length > 1,
+                }"
+              >
+                <DraftTextInput
+                  class="cell-field-inner"
+                  input-class="cell-edit"
+                  :model-value="String(row.cells?.[header] ?? '')"
+                  @commit="(value) => onRowCellCommit(row.row_index, header, value)"
+                >
+                  <template #sizer="{ text }">
+                    <span class="cell-field-sizer" aria-hidden="true">{{
+                      fieldSizerText(header, text)
+                    }}</span>
+                  </template>
+                </DraftTextInput>
+                <PriorityValueMenu
+                  v-if="priorityConflictValues(row, header).length > 1"
+                  :values="priorityConflictValues(row, header)"
+                  :current-value="String(row.cells?.[header] ?? '')"
+                  @select="(value) => onRowCellCommit(row.row_index, header, value)"
                 />
               </div>
               <div v-else class="cell-field-box cell-field-box--static">

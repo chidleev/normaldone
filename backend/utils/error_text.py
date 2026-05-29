@@ -20,28 +20,15 @@ def format_gemini_quota_hint(
     llm_provider: str,
     llm_model: str | None,
 ) -> str:
-    """Подсказка, если 429 пришёл не от той модели, что в дашборде Flash Lite."""
+    """Короткое сообщение о 429: этап и используемые модели."""
     embed = embedding_model or embedding_provider
     llm = llm_model or llm_provider
-    lines = [
-        "Квота Google Gemini исчерпана (429).",
-        f"Этап сбоя: {phase}.",
-        f"Векторизация: {embedding_provider} → {embed}.",
-        f"Профиль кластера (LLM): {llm_provider} → {llm}.",
-    ]
-    if embedding_provider == "gemini":
-        lines.append(
-            "В дашборде «Gemini 3.1 Flash Lite» не видны вызовы векторизации — "
-            "смотрите модель embedding (gemini-embedding-001) или общий лимит проекта."
-        )
-    elif llm_provider == "gemini":
-        lines.append(
-            "Проверьте лимиты модели GEMINI_MODEL и billing: https://ai.google.dev/gemini-api/docs/rate-limits"
-        )
-    lines.append(
-        "Чтобы не тратить квоту: Векторизация=local, Профиль кластера=g4f."
+    return (
+        "Лимит Google Gemini (429). "
+        f"Этап: {phase}. "
+        f"Embedding: {embed}. "
+        f"LLM: {llm}."
     )
-    return " ".join(lines)
 
 
 def sanitize_error_message(
@@ -86,12 +73,7 @@ def sanitize_error_message(
         )
 
     if _is_gemini_quota_error(text):
-        return (
-            "Квота Google Gemini исчерпана (429). "
-            "Кластеризация может вызывать gemini-embedding-001 (векторизация) и "
-            "GEMINI_MODEL (профиль кластера) — в дашборде это разные модели. "
-            "Поставьте Векторизация=local, Профиль=g4f или проверьте billing."
-        )
+        return "Лимит Google Gemini (429)."
 
     text = re.sub(r"\s+", " ", text)
     if len(text) > 500:

@@ -7,17 +7,25 @@ from typing import Any
 
 from sklearn.cluster import AgglomerativeClustering
 
+from infrastructure.ml.ml_config import read_cluster_distance_threshold
+
 
 class ItemClusterizer:
     """Кластеризатор товаров по косинусному расстоянию эмбеддингов."""
 
-    def __init__(self, distance_threshold: float = 0.2) -> None:
+    def __init__(self, distance_threshold: float | None = None) -> None:
         """Настраивает агломеративную кластеризацию без фиксированного числа групп."""
+        threshold = (
+            distance_threshold
+            if distance_threshold is not None
+            else read_cluster_distance_threshold()
+        )
+        self.distance_threshold = threshold
         self.model = AgglomerativeClustering(
             n_clusters=None,
             metric="cosine",
             linkage="average",
-            distance_threshold=distance_threshold,
+            distance_threshold=threshold,
         )
 
     def clusterize(

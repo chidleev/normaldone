@@ -63,6 +63,22 @@ class ClusterInput(BaseModel):
     name: str = Field(..., description="Название кластера")
     attributes: list[str] = Field(..., description="Атрибуты кластера")
     items: list[str] = Field(..., description="Названия товаров в кластере")
+    enriched_name_template: str = Field(
+        default="",
+        description="Шаблон обогащённого наименования с плейсхолдерами {атрибут}",
+    )
+    item_sources: dict[str, str] = Field(
+        default_factory=dict,
+        description="Источник строки: memory|ai по исходной номенклатуре",
+    )
+    attribute_merge: dict[str, str] = Field(
+        default_factory=dict,
+        description="Режим слияния атрибутов: priority|accumulative",
+    )
+    attribute_merge_separators: dict[str, str] = Field(
+        default_factory=dict,
+        description="Разделитель для аккумулятивного слияния (например ', ' или '; ')",
+    )
 
 
 class NormalizeRequest(BaseModel):

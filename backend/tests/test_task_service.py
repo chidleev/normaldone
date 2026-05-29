@@ -59,7 +59,11 @@ class FakeGeminiClient:
         self, items: list[str], base_attrs: list[str]
     ) -> dict[str, Any]:
         _ = (items, base_attrs)
-        return {"category": "Тестовая категория", "attributes": ["тип", "материал"]}
+        return {
+            "category": "Тестовая категория",
+            "attributes": ["тип", "материал"],
+            "name_template": "{тип} {материал}",
+        }
 
     async def normalize_items(
         self, items: list[str], attributes: list[str]
@@ -150,6 +154,7 @@ def test_normalize_task_applies_standardizer() -> None:
                     name="cluster",
                     attributes=["вес", "длина"],
                     items=["item-1", "item-2"],
+                    enriched_name_template="{вес} {длина}",
                 )
             ],
             llm_provider=NormalizeProvider.G4F,
@@ -160,6 +165,7 @@ def test_normalize_task_applies_standardizer() -> None:
             data=request,
             llm_client=FakeGeminiClient(),
             standardizer=FakeStandardizer(),
+            vectorizer=FakeVectorizer(),
             task_store=redis,
         )
 
@@ -169,5 +175,8 @@ def test_normalize_task_applies_standardizer() -> None:
         first = state["result"]["normalized"][0]
         assert first["values"]["вес"] == "5 кг"
         assert first["values"]["длина"] == "100 мм"
+        assert "enriched_name" in first
+        assert state["result"]["clusters_collapsed"]
+        assert state["result"]["clusters_collapsed"][0]["rows"]
 
     asyncio.run(_run())

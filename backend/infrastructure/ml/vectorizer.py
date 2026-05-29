@@ -30,17 +30,22 @@ class TextVectorizer:
         self.model: SentenceTransformer = SentenceTransformer(self.model_name)
         self.__class__._initialized = True
 
-    def get_embeddings(self, texts: list[str], batch_size: int = 32) -> list[list[float]]:
+    def get_embeddings(
+        self,
+        texts: list[str],
+        batch_size: int | None = None,
+    ) -> list[list[float]]:
         """Вычисляет эмбеддинги батчами и возвращает list[list[float]]."""
         if not texts:
             return []
 
+        size = batch_size or 32
         all_vectors: list[list[float]] = []
-        for idx in range(0, len(texts), batch_size):
-            batch: list[str] = texts[idx : idx + batch_size]
+        for idx in range(0, len(texts), size):
+            batch: list[str] = texts[idx : idx + size]
             vectors: np.ndarray = self.model.encode(
                 batch,
-                batch_size=batch_size,
+                batch_size=size,
                 convert_to_numpy=True,
                 show_progress_bar=False,
             )

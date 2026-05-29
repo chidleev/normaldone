@@ -151,7 +151,11 @@ class BaseLLMClient:
     ) -> dict[str, Any]:
         batches = chunk_items(items, self.batch_size)
         if not batches:
-            return {"category": "Без категории", "attributes": list(base_attrs)}
+            return {
+                "category": "Без категории",
+                "attributes": list(base_attrs),
+                "name_template": "",
+            }
 
         def build_prompt(batch: list[str]) -> str:
             if base_attrs:
@@ -159,22 +163,29 @@ class BaseLLMClient:
             else:
                 attrs_hint = "Базовые атрибуты не заданы — предложи полный набор атрибутов самостоятельно.\n"
             return (
-                "Проанализируй список товаров и верни название кластера, которое будет однозначно идентифицировать товары в этом кластере. "
+                "Проанализируй список товаров и верни название кластера (что это за продукт + общий признак, который будет однозначно идентифицировать товары в этом кластере - например бренд). "
                 "Затем предложи (дополни) максимально полный список необходимых и полезных атрибутов, "
-                "которые можно извлечь из названия товаров или найти через веб-поиск.\n"
+                "которые можно извлечь из названия товаров или найти через веб-поиск. "
+                "Также предложи шаблон обогащённого стандартизованного наименования (name_template): "
+                "слова и символы с плейсхолдерами {имя_атрибута} для подстановки значений атрибутов.\n"
                 f"Список товаров: {batch}\n"
                 f"{attrs_hint}"
                 'Пример ответа: {"category": "Фильтры топливные", "attributes": '
-                '["бренд", "артикул", "единица измерения", "тип фильтра", "двигатель", "совместимые OEM"]}'
+                '["бренд", "артикул", "тип фильтра"], '
+                '"name_template": "{бренд} фильтр {тип фильтра} {артикул}"}'
             )
 
         categories: list[str] = []
+        templates: list[str] = []
 
         def parse_batch(payload: dict[str, Any]) -> Iterator[str]:
             parsed = ClusterAttributesResponse.model_validate(payload)
             category = str(parsed.category).strip()
             if category:
                 categories.append(category)
+            template = str(parsed.name_template or "").strip()
+            if template:
+                templates.append(template)
             yield from parsed.attributes
 
         attributes = await self._run_batched_requests(
@@ -185,7 +196,12 @@ class BaseLLMClient:
         )
         unique_attributes = list(dict.fromkeys(base_attrs + attributes))
         category = categories[0] if categories else "Без категории"
-        return {"category": category, "attributes": unique_attributes}
+        name_template = templates[0] if templates else ""
+        return {
+            "category": category,
+            "attributes": unique_attributes,
+            "name_template": name_template,
+        }
 
     @staticmethod
     def _validate_normalize_batch(

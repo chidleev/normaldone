@@ -8,11 +8,15 @@ from pydantic import BaseModel, Field
 
 
 class MemoryItem(BaseModel):
-    """Один товар для сохранения в векторной памяти."""
+    """Один товар для сохранения в векторную памяти."""
 
-    text: str = Field(..., description="Название товара")
+    text: str = Field(..., description="Обогащённое стандартизованное наименование")
     attributes: dict[str, Any] = Field(..., description="Заполненные атрибуты товара")
     cluster_name: str = Field(..., description="Имя кластера из UI")
+    original_items: list[str] = Field(
+        default_factory=list,
+        description="Исходные номенклатуры",
+    )
 
 
 class MemorySaveRequest(BaseModel):

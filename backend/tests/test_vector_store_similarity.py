@@ -30,6 +30,7 @@ def test_find_similar_uses_score_threshold_and_skips_empty_attributes() -> None:
         "text": "Кабель IEK",
         "cluster_name": "Кабели",
         "attributes": {"бренд": "IEK"},
+        "original_items": [],
     }
     assert matches[1] is None
     assert matches[2] is None
@@ -68,6 +69,14 @@ def test_save_items_includes_cluster_name_in_payload() -> None:
         cluster_names=["Фильтры"],
     )
 
+    storage.save_items(
+        texts=["Товар B"],
+        vectors=[[0.2, 0.3]],
+        attributes=[{"бренд": "Y"}],
+        cluster_names=["Фильтры"],
+        original_items_list=[["Исходное B"]],
+    )
     point = storage.client.upsert.call_args.kwargs["points"][0]
     assert point.payload["cluster_name"] == "Фильтры"
-    assert point.payload["attributes"] == {"бренд": "X"}
+    assert point.payload["attributes"] == {"бренд": "Y"}
+    assert point.payload["original_items"] == ["Исходное B"]

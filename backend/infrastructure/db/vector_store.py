@@ -41,10 +41,15 @@ class VectorStorage:
             return None
         cluster_name = str(payload.get("cluster_name") or "").strip() or _LEGACY_CLUSTER_NAME
         text = str(payload.get("text") or "").strip()
+        raw_originals = payload.get("original_items")
+        originals: list[str] = []
+        if isinstance(raw_originals, list):
+            originals = [str(name).strip() for name in raw_originals if str(name).strip()]
         return {
             "text": text,
             "cluster_name": cluster_name,
             "attributes": {str(k): v for k, v in raw_attributes.items()},
+            "original_items": originals,
         }
 
     def save_items(
@@ -53,12 +58,15 @@ class VectorStorage:
         vectors: list[list[float]],
         attributes: list[dict[str, Any]],
         cluster_names: list[str] | None = None,
+        original_items_list: list[list[str]] | None = None,
     ) -> None:
         """Сохраняет товары: эмбеддинги + атрибуты + имя кластера в payload."""
         if not (len(texts) == len(vectors) == len(attributes)):
             raise ValueError("texts, vectors и attributes должны быть одной длины")
         if cluster_names is not None and len(cluster_names) != len(texts):
             raise ValueError("cluster_names должны быть той же длины, что texts")
+        if original_items_list is not None and len(original_items_list) != len(texts):
+            raise ValueError("original_items_list должны быть той же длины, что texts")
         if not texts:
             return
 
@@ -81,6 +89,13 @@ class VectorStorage:
                 if cluster_names is not None
                 else _LEGACY_CLUSTER_NAME
             )
+            originals: list[str] = []
+            if original_items_list is not None:
+                originals = [
+                    str(name).strip()
+                    for name in original_items_list[index]
+                    if str(name).strip()
+                ]
             points.append(
                 models.PointStruct(
                     id=self._item_id(text),
@@ -89,6 +104,7 @@ class VectorStorage:
                         "text": text,
                         "attributes": item_attributes,
                         "cluster_name": cluster_name or _LEGACY_CLUSTER_NAME,
+                        "original_items": originals,
                     },
                 )
             )

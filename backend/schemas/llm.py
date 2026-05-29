@@ -10,6 +10,10 @@ class ClusterAttributesResponse(BaseModel):
 
     category: str = Field(default="Без категории")
     attributes: list[str] = Field(default_factory=list)
+    name_template: str = Field(
+        default="",
+        description="Шаблон обогащённого наименования с плейсхолдерами {атрибут}",
+    )
 
 
 class NormalizedItem(BaseModel):

@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from infrastructure.db.redis_client import RedisStorage
 from infrastructure.db.vector_store import VectorStorage
 from infrastructure.ml.clusterizer import ItemClusterizer
+from infrastructure.ml.ml_config import read_cluster_distance_threshold
 from infrastructure.ml.vectorizer import TextVectorizer
 from infrastructure.utils.standardizer import DataStandardizer
 
@@ -24,13 +25,14 @@ async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
     app_instance.state.vectorizer = TextVectorizer()
     app_instance.state.embedding_clients = {"local": app_instance.state.vectorizer}
     app_instance.state.vector_db = VectorStorage()
-    app_instance.state.clusterizer = ItemClusterizer()
+    cluster_threshold = read_cluster_distance_threshold()
+    app_instance.state.clusterizer = ItemClusterizer(distance_threshold=cluster_threshold)
     app_instance.state.llm_clients = {}
     app_instance.state.standardizer = DataStandardizer()
     logger.info("RedisStorage initialized")
     logger.info("TextVectorizer initialized")
     logger.info("VectorStorage initialized")
-    logger.info("ItemClusterizer initialized")
+    logger.info("ItemClusterizer initialized (distance_threshold=%s)", cluster_threshold)
     logger.info("LLM clients cache initialized")
     logger.info("DataStandardizer initialized")
     yield

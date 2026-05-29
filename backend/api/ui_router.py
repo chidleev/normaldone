@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -15,11 +16,14 @@ from openpyxl import Workbook, load_workbook
 import os
 
 from api.task_dispatch import (
+    _get_embedding_client,
     dispatch_clusterize,
     dispatch_memory_save,
     dispatch_normalize,
     fetch_task_status,
 )
+from infrastructure.naming.enriched_name import collapse_cluster_rows, render_template
+from infrastructure.naming.merge_separators import normalize_merge_separator
 from infrastructure.llm.factory import resolve_llm_provider
 from pydantic import BaseModel, Field
 from schemas.memory import MemoryItem, MemorySaveRequest
@@ -33,6 +37,26 @@ from schemas.task import (
 )
 
 router = APIRouter(tags=["ui"])
+
+
+def _normalize_attribute_merge(raw: dict[str, Any] | None) -> dict[str, str]:
+    return {
+        str(key).strip(): str(value).strip()
+        for key, value in dict(raw or {}).items()
+        if str(key).strip() and str(value).strip() in ("priority", "accumulative")
+    }
+
+
+def _normalize_attribute_merge_separators(raw: dict[str, Any] | None) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for key, value in dict(raw or {}).items():
+        attr = str(key).strip()
+        if not attr:
+            continue
+        separator = normalize_merge_separator(str(value))
+        if separator:
+            normalized[attr] = separator
+    return normalized
 
 
 @dataclass
@@ -220,18 +244,98 @@ def _clean_rows(rows: list[dict[str, str]]) -> tuple[list[dict[str, str]], int, 
 
 
 def _item_cluster_name_map(clusters: list[dict[str, Any]]) -> dict[str, str]:
-    """Строит соответствие номенклатура → имя кластера из approved_clusters."""
+    """Строит соответствие номенклатура/обогащённое имя → имя кластера."""
     mapping: dict[str, str] = {}
     for cluster in clusters:
         name = str(cluster.get("name", "")).strip() or "Cluster"
         item_names = [str(i).strip() for i in cluster.get("items", []) if str(i).strip()]
         for row in cluster.get("rows") or []:
+            enriched = str(row.get("enriched_name") or "").strip()
+            if enriched:
+                mapping[enriched] = name
+            for alias in row.get("aliases") or []:
+                alias_name = str(alias).strip()
+                if alias_name:
+                    mapping[alias_name] = name
             item_name = str(row.get("item", "")).strip()
             if item_name:
                 item_names.append(item_name)
         for item_name in item_names:
             mapping[item_name] = name
     return mapping
+
+
+def _row_entries_for_rededupe(row: dict[str, Any], template: str) -> list[dict[str, Any]]:
+    """Разворачивает строку кластера в позиции для повторной дедупликации."""
+    entries: list[dict[str, Any]] = []
+    row_source = str(row.get("source") or "ai").strip().lower()
+    if row_source not in ("memory", "ai"):
+        row_source = "ai"
+    row_values = {
+        str(key).strip(): str(value).strip()
+        for key, value in dict(row.get("values") or {}).items()
+        if str(key).strip()
+    }
+    enriched_row = str(row.get("enriched_name") or "").strip()
+    members = row.get("members") or []
+    if members:
+        for member in members:
+            item_name = str(member.get("item", "")).strip()
+            if not item_name:
+                continue
+            values = {
+                str(key).strip(): str(value).strip()
+                for key, value in dict(member.get("values") or row_values).items()
+                if str(key).strip()
+            }
+            source = str(member.get("source") or row_source).strip().lower()
+            if source not in ("memory", "ai"):
+                source = row_source
+            enriched = render_template(template, values) if template else enriched_row or item_name
+            entries.append(
+                {
+                    "enriched_name": enriched,
+                    "item": item_name,
+                    "values": values,
+                    "source": source,
+                }
+            )
+        return entries
+
+    aliases = [str(alias).strip() for alias in row.get("aliases") or [] if str(alias).strip()]
+    if not aliases:
+        item_name = str(row.get("item", "")).strip()
+        if item_name:
+            aliases = [item_name]
+    for alias in aliases:
+        enriched = render_template(template, row_values) if template else enriched_row or alias
+        entries.append(
+            {
+                "enriched_name": enriched,
+                "item": alias,
+                "values": dict(row_values),
+                "source": row_source,
+            }
+        )
+    return entries
+
+
+def _apply_collapsed_clusters(session: SessionData) -> None:
+    """Подменяет approved_clusters схлопнутыми строками после нормализации."""
+    collapsed = (session.normalize_result or {}).get("clusters_collapsed") or []
+    if not collapsed:
+        return
+    by_name = {str(c.get("name", "")).strip(): c for c in collapsed if str(c.get("name", "")).strip()}
+    updated: list[dict[str, Any]] = []
+    for cluster in session.approved_clusters or []:
+        name = str(cluster.get("name", "")).strip()
+        if name in by_name:
+            merged = dict(cluster)
+            merged.update(by_name[name])
+            updated.append(merged)
+        else:
+            updated.append(cluster)
+    session.approved_clusters = updated
 
 
 def _clusters_from_known_items(
@@ -270,11 +374,18 @@ def _clusters_from_known_items(
                 if key not in attr_keys:
                     attr_keys.append(key)
             items.append(item_name)
-            rows.append({"item": item_name, "values": values})
+            rows.append({"item": item_name, "values": values, "source": "memory"})
+        template = ""
+        for known in group:
+            candidate = str(known.get("name_template") or "").strip()
+            if candidate:
+                template = candidate
+                break
         clusters.append(
             {
                 "name": cluster_name,
                 "attributes": attr_keys or list(base_attributes),
+                "enriched_name_template": template,
                 "items": items,
                 "rows": rows,
             }
@@ -288,11 +399,19 @@ def _build_default_clusters(clusterize_result: dict[str, Any] | None) -> list[di
     base_attributes = list(clusterize_result.get("base_attributes") or [])
     clusters: list[dict[str, Any]] = []
     for idx, cluster in enumerate(clusterize_result.get("new_item_clusters", []), start=1):
+        cluster_items = [
+            str(item) for item in cluster.get("cluster_items", []) if str(item).strip()
+        ]
         clusters.append(
             {
                 "name": str(cluster.get("category") or f"Cluster {idx}"),
                 "attributes": list(cluster.get("attributes") or base_attributes),
-                "items": [str(item) for item in cluster.get("cluster_items", []) if str(item).strip()],
+                "enriched_name_template": str(cluster.get("name_template") or "").strip(),
+                "items": cluster_items,
+                "rows": [
+                    {"item": item_name, "values": {}, "source": "ai"}
+                    for item_name in cluster_items
+                ],
             }
         )
     clusters.extend(
@@ -304,14 +423,111 @@ def _build_default_clusters(clusterize_result: dict[str, Any] | None) -> list[di
     return clusters
 
 
+def _memory_item_names(session: SessionData) -> set[str]:
+    """Номенклатура, найденная в Qdrant при последней кластеризации."""
+    names: set[str] = set()
+    for known in (session.clusterize_result or {}).get("known_items") or []:
+        item_name = str(known.get("item", "")).strip()
+        if item_name:
+            names.add(item_name)
+    return names
+
+
 def _clusters_for_ui(session: SessionData) -> list[dict[str, Any]]:
     """Кластеры для UI: items + rows с values после нормализации."""
     clusters = session.approved_clusters or []
+    memory_items = _memory_item_names(session)
     normalized_map: dict[str, dict[str, Any]] = {
         str(row.get("item", "")).strip(): dict(row.get("values") or {})
         for row in (session.normalize_result or {}).get("normalized") or []
         if str(row.get("item", "")).strip()
     }
+
+    has_enriched_rows = any(
+        str(row.get("enriched_name") or "").strip()
+        for cluster in clusters
+        for row in cluster.get("rows") or []
+    )
+    if has_enriched_rows:
+        payload: list[dict[str, Any]] = []
+        for cluster in clusters:
+            name = str(cluster.get("name", "")).strip() or "Cluster"
+            attrs = [str(a).strip() for a in cluster.get("attributes", []) if str(a).strip()]
+            rows: list[dict[str, Any]] = []
+            for row in cluster.get("rows") or []:
+                enriched = str(row.get("enriched_name") or "").strip()
+                if not enriched:
+                    continue
+                aliases = [
+                    str(alias).strip()
+                    for alias in row.get("aliases") or []
+                    if str(alias).strip()
+                ]
+                if not aliases:
+                    aliases = [str(row.get("item", "")).strip()] if row.get("item") else []
+                values_raw = dict(row.get("values") or {})
+                for alias in aliases:
+                    values_raw = {**values_raw, **normalized_map.get(alias, {})}
+                row_attrs = list(attrs)
+                for key in values_raw:
+                    key_name = str(key).strip()
+                    if key_name and key_name not in row_attrs:
+                        row_attrs.append(key_name)
+                source = str(row.get("source") or "ai").strip().lower()
+                if source not in ("memory", "ai"):
+                    source = "ai"
+                members_raw = row.get("members") or []
+                members = [
+                    {
+                        "item": str(member.get("item", "")).strip(),
+                        "values": {
+                            str(k).strip(): str(v).strip()
+                            for k, v in dict(member.get("values") or {}).items()
+                            if str(k).strip()
+                        },
+                        "source": str(member.get("source") or source).strip().lower()
+                        if str(member.get("source") or source).strip().lower()
+                        in ("memory", "ai")
+                        else source,
+                    }
+                    for member in members_raw
+                    if str(member.get("item", "")).strip()
+                ]
+                rows.append(
+                    {
+                        "enriched_name": enriched,
+                        "aliases": aliases or [enriched],
+                        "item": aliases[0] if aliases else enriched,
+                        "values": {
+                            attr: str(values_raw.get(attr, "")).strip() for attr in row_attrs
+                        },
+                        "source": source,
+                        "members": members,
+                    }
+                )
+            merged_attrs = list(attrs)
+            for row in rows:
+                for attr in row["values"]:
+                    if attr not in merged_attrs:
+                        merged_attrs.append(attr)
+            attribute_merge = _normalize_attribute_merge(cluster.get("attribute_merge"))
+            attribute_merge_separators = _normalize_attribute_merge_separators(
+                cluster.get("attribute_merge_separators")
+            )
+            payload.append(
+                {
+                    "name": name,
+                    "attributes": merged_attrs or attrs,
+                    "enriched_name_template": str(
+                        cluster.get("enriched_name_template") or ""
+                    ).strip(),
+                    "attribute_merge": attribute_merge,
+                    "attribute_merge_separators": attribute_merge_separators,
+                    "items": [row["enriched_name"] for row in rows],
+                    "rows": rows,
+                }
+            )
+        return payload
 
     payload: list[dict[str, Any]] = []
     for cluster in clusters:
@@ -319,16 +535,20 @@ def _clusters_for_ui(session: SessionData) -> list[dict[str, Any]]:
         attrs = [str(a).strip() for a in cluster.get("attributes", []) if str(a).strip()]
         items = [str(i).strip() for i in cluster.get("items", []) if str(i).strip()]
         stored_rows_map: dict[str, dict[str, Any]] = {
-            str(row.get("item", "")).strip(): dict(row.get("values") or {})
+            str(row.get("item", "")).strip(): row
             for row in cluster.get("rows") or []
             if str(row.get("item", "")).strip()
         }
         rows: list[dict[str, Any]] = []
         for item_name in items:
+            stored_row = stored_rows_map.get(item_name, {})
             values_raw = {
-                **stored_rows_map.get(item_name, {}),
+                **dict(stored_row.get("values") or {}),
                 **normalized_map.get(item_name, {}),
             }
+            source = str(stored_row.get("source") or "").strip().lower()
+            if source not in ("memory", "ai"):
+                source = "memory" if item_name in memory_items else "ai"
             row_attrs = list(attrs)
             for key in values_raw:
                 key_name = str(key).strip()
@@ -338,6 +558,7 @@ def _clusters_for_ui(session: SessionData) -> list[dict[str, Any]]:
                 {
                     "item": item_name,
                     "values": {attr: str(values_raw.get(attr, "")).strip() for attr in row_attrs},
+                    "source": source,
                 }
             )
         merged_attrs = list(attrs)
@@ -349,6 +570,9 @@ def _clusters_for_ui(session: SessionData) -> list[dict[str, Any]]:
             {
                 "name": name,
                 "attributes": merged_attrs or attrs,
+                "enriched_name_template": str(
+                    cluster.get("enriched_name_template") or ""
+                ).strip(),
                 "items": items,
                 "rows": rows,
             }
@@ -646,14 +870,38 @@ async def start_normalize(
         raise HTTPException(status_code=400, detail="Approve clusters first")
     if payload.provider:
         session.normalize_provider = _validate_llm_provider(payload.provider)
-    clusters = [
-        ClusterInput(
-            name=str(cluster.get("name", "")).strip() or "Cluster",
-            attributes=[str(a).strip() for a in cluster.get("attributes", []) if str(a).strip()],
-            items=[str(i).strip() for i in cluster.get("items", []) if str(i).strip()],
+    clusters = []
+    for cluster in session.approved_clusters:
+        item_sources: dict[str, str] = {}
+        items: list[str] = []
+        for row in cluster.get("rows") or []:
+            item_name = str(row.get("item", "")).strip()
+            if not item_name:
+                continue
+            items.append(item_name)
+            source = str(row.get("source") or "ai").strip().lower()
+            item_sources[item_name] = source if source in ("memory", "ai") else "ai"
+        if not items:
+            items = [str(i).strip() for i in cluster.get("items", []) if str(i).strip()]
+        attribute_merge = _normalize_attribute_merge(cluster.get("attribute_merge"))
+        attribute_merge_separators = _normalize_attribute_merge_separators(
+            cluster.get("attribute_merge_separators")
         )
-        for cluster in session.approved_clusters
-    ]
+        clusters.append(
+            ClusterInput(
+                name=str(cluster.get("name", "")).strip() or "Cluster",
+                attributes=[
+                    str(a).strip() for a in cluster.get("attributes", []) if str(a).strip()
+                ],
+                items=items,
+                enriched_name_template=str(
+                    cluster.get("enriched_name_template") or ""
+                ).strip(),
+                item_sources=item_sources,
+                attribute_merge=attribute_merge,
+                attribute_merge_separators=attribute_merge_separators,
+            )
+        )
     body = NormalizeRequest(
         clusters=clusters,
         llm_provider=NormalizeProvider(session.normalize_provider),
@@ -682,6 +930,7 @@ async def get_task_status(session_id: str, task_type: str, request: Request) -> 
             session.approved_clusters = _build_default_clusters(session.clusterize_result)
     else:
         session.normalize_result = status.result or {}
+        _apply_collapsed_clusters(session)
     return payload
 
 
@@ -694,17 +943,146 @@ async def get_clusters(session_id: str) -> dict[str, Any]:
 async def save_clusters(payload: ClustersPayload) -> dict[str, Any]:
     session = _get_session(payload.session_id)
     valid: list[dict[str, Any]] = []
+    memory_items = _memory_item_names(session)
     for cluster in payload.clusters:
         name = str(cluster.get("name", "")).strip() or "Cluster"
         attrs = [str(v).strip() for v in cluster.get("attributes", []) if str(v).strip()]
         items = [str(v).strip() for v in cluster.get("items", []) if str(v).strip()]
         if not items:
             continue
-        valid.append({"name": name, "attributes": attrs or session.base_attributes, "items": items})
+        payload_rows = cluster.get("rows") or []
+        rows: list[dict[str, Any]] = []
+        if payload_rows:
+            for row in payload_rows:
+                item_name = str(row.get("item", "")).strip()
+                if not item_name:
+                    continue
+                source = str(row.get("source") or "").strip().lower()
+                if source not in ("memory", "ai"):
+                    source = "memory" if item_name in memory_items else "ai"
+                values = row.get("values")
+                row_values = values if isinstance(values, dict) else {}
+                enriched = str(row.get("enriched_name") or "").strip()
+                aliases_raw = row.get("aliases") or []
+                aliases = [
+                    str(alias).strip() for alias in aliases_raw if str(alias).strip()
+                ]
+                row_payload: dict[str, Any] = {
+                    "item": item_name,
+                    "values": {
+                        str(k).strip(): str(v).strip()
+                        for k, v in row_values.items()
+                        if str(k).strip()
+                    },
+                    "source": source,
+                }
+                if enriched:
+                    row_payload["enriched_name"] = enriched
+                if aliases:
+                    row_payload["aliases"] = aliases
+                members_raw = row.get("members") or []
+                members = [
+                    {
+                        "item": str(member.get("item", "")).strip(),
+                        "values": {
+                            str(k).strip(): str(v).strip()
+                            for k, v in dict(member.get("values") or {}).items()
+                            if str(k).strip()
+                        },
+                        "source": str(member.get("source") or source).strip().lower()
+                        if str(member.get("source") or source).strip().lower()
+                        in ("memory", "ai")
+                        else source,
+                    }
+                    for member in members_raw
+                    if str(member.get("item", "")).strip()
+                ]
+                if members:
+                    row_payload["members"] = members
+                rows.append(row_payload)
+        else:
+            rows = [
+                {
+                    "item": item_name,
+                    "values": {},
+                    "source": "memory" if item_name in memory_items else "ai",
+                }
+                for item_name in items
+            ]
+        attribute_merge = _normalize_attribute_merge(cluster.get("attribute_merge"))
+        attribute_merge_separators = _normalize_attribute_merge_separators(
+            cluster.get("attribute_merge_separators")
+        )
+        valid.append(
+            {
+                "name": name,
+                "attributes": attrs or session.base_attributes,
+                "enriched_name_template": str(
+                    cluster.get("enriched_name_template") or ""
+                ).strip(),
+                "attribute_merge": attribute_merge,
+                "attribute_merge_separators": attribute_merge_separators,
+                "items": items,
+                "rows": rows,
+            }
+        )
     if not valid:
         raise HTTPException(status_code=400, detail="No valid clusters to save")
     session.approved_clusters = valid
     return {"saved_clusters": len(valid)}
+
+
+@router.post("/ui/api/clusters/{session_id}/rededupe")
+async def rededupe_clusters(session_id: str, request: Request) -> dict[str, Any]:
+    """Пересчитывает дубликаты обогащённых имён в утверждённых кластерах."""
+    session = _get_session(session_id)
+    if not session.approved_clusters:
+        raise HTTPException(status_code=400, detail="No clusters to rededupe")
+
+    provider_name = str(session.embedding_provider or EmbeddingProvider.LOCAL.value)
+    try:
+        provider = EmbeddingProvider(provider_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _provider_label, embedding_client = _get_embedding_client(request, provider)
+
+    updated_clusters: list[dict[str, Any]] = []
+    for cluster in session.approved_clusters:
+        template = str(cluster.get("enriched_name_template") or "").strip()
+        attribute_merge = _normalize_attribute_merge(cluster.get("attribute_merge"))
+        attribute_merge_separators = _normalize_attribute_merge_separators(
+            cluster.get("attribute_merge_separators")
+        )
+        entries: list[dict[str, Any]] = []
+        for row in cluster.get("rows") or []:
+            entries.extend(_row_entries_for_rededupe(row, template))
+        if not entries:
+            updated_clusters.append(cluster)
+            continue
+        texts = [
+            str(entry.get("enriched_name") or entry.get("item") or "").strip()
+            for entry in entries
+        ]
+        embeddings = await asyncio.to_thread(embedding_client.get_embeddings, texts)
+        collapsed = await asyncio.to_thread(
+            collapse_cluster_rows,
+            entries,
+            embeddings,
+            None,
+            attribute_merge,
+            attribute_merge_separators,
+        )
+        merged = dict(cluster)
+        merged["rows"] = collapsed
+        merged["items"] = [
+            str(row.get("enriched_name") or row.get("item") or "").strip()
+            for row in collapsed
+            if str(row.get("enriched_name") or row.get("item") or "").strip()
+        ]
+        updated_clusters.append(merged)
+
+    session.approved_clusters = updated_clusters
+    return {"clusters": _clusters_for_ui(session)}
 
 
 @router.post("/ui/api/memory/save")
@@ -717,23 +1095,44 @@ async def save_memory(payload: SaveMemoryPayload, request: Request) -> dict[str,
         raise HTTPException(status_code=400, detail="No clusters to map items to memory")
     cluster_by_item = _item_cluster_name_map(session.approved_clusters)
     items: list[MemoryItem] = []
-    for row in normalized:
-        item_name = str(row.get("item", "")).strip()
-        if not item_name:
-            continue
-        cluster_name = cluster_by_item.get(item_name)
-        if not cluster_name:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Item not found in approved clusters: {item_name}",
+    for cluster in session.approved_clusters:
+        cluster_name = str(cluster.get("name", "")).strip() or "Cluster"
+        for row in cluster.get("rows") or []:
+            enriched = str(row.get("enriched_name") or "").strip()
+            if not enriched:
+                continue
+            aliases = [
+                str(alias).strip()
+                for alias in row.get("aliases") or []
+                if str(alias).strip()
+            ]
+            items.append(
+                MemoryItem(
+                    text=enriched,
+                    attributes=dict(row.get("values") or {}),
+                    cluster_name=cluster_name,
+                    original_items=aliases or [enriched],
+                )
             )
-        items.append(
-            MemoryItem(
-                text=item_name,
-                attributes=dict(row.get("values", {})),
-                cluster_name=cluster_name,
+    if not items:
+        for row in normalized:
+            item_name = str(row.get("item", "")).strip()
+            if not item_name:
+                continue
+            cluster_name = cluster_by_item.get(item_name)
+            if not cluster_name:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Item not found in approved clusters: {item_name}",
+                )
+            items.append(
+                MemoryItem(
+                    text=str(row.get("enriched_name") or item_name).strip(),
+                    attributes=dict(row.get("values", {})),
+                    cluster_name=cluster_name,
+                    original_items=[item_name],
+                )
             )
-        )
     if not items:
         raise HTTPException(status_code=400, detail="No valid normalized items")
     saved = await dispatch_memory_save(
@@ -764,10 +1163,26 @@ async def export_xlsx(session_id: str) -> StreamingResponse:
         ws = wb.create_sheet(title=sheet_name)
         attributes = [str(a).strip() for a in cluster.get("attributes", []) if str(a).strip()]
         items = [str(i).strip() for i in cluster.get("items", []) if str(i).strip()]
-        ws.append(["Номенклатура", *attributes])
+        ws.append(["Обогащенное наименование", "Исходные номенклатуры", *attributes])
+        for row in cluster.get("rows") or []:
+            enriched = str(row.get("enriched_name") or "").strip()
+            aliases = row.get("aliases") or []
+            if enriched:
+                values = dict(row.get("values") or {})
+                for alias in aliases:
+                    values = {**values, **normalized_map.get(str(alias).strip(), {})}
+                originals = "; ".join(str(a).strip() for a in aliases if str(a).strip())
+                ws.append(
+                    [
+                        enriched,
+                        originals,
+                        *[values.get(attr, "") for attr in attributes],
+                    ]
+                )
+                continue
         for item_name in items:
             values = normalized_map.get(item_name, {})
-            ws.append([item_name, *[values.get(attr, "") for attr in attributes]])
+            ws.append([item_name, item_name, *[values.get(attr, "") for attr in attributes]])
 
     output = io.BytesIO()
     wb.save(output)

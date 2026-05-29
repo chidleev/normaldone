@@ -1,11 +1,12 @@
 <script setup>
 import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
-import { ArrowRightLeft } from "@lucide/vue";
+import { ChevronDown } from "@lucide/vue";
 import IconButton from "./IconButton.vue";
 import { computeFloatingMenuPosition } from "../utils/floatingMenuPosition";
 
 const props = defineProps({
-  targets: { type: Array, default: () => [] },
+  values: { type: Array, default: () => [] },
+  currentValue: { type: String, default: "" },
 });
 
 const emit = defineEmits(["select"]);
@@ -22,7 +23,7 @@ function updateMenuPosition() {
 }
 
 async function toggle() {
-  if (!props.targets.length) return;
+  if (!props.values.length) return;
   if (open.value) {
     open.value = false;
     return;
@@ -36,8 +37,8 @@ async function toggle() {
   updateMenuPosition();
 }
 
-function pick(targetClusterIdx) {
-  emit("select", targetClusterIdx);
+function pick(value) {
+  emit("select", String(value ?? ""));
   open.value = false;
 }
 
@@ -52,58 +53,49 @@ function onKeydown(event) {
   if (event.key === "Escape") open.value = false;
 }
 
-function onViewportChange() {
-  if (!open.value) return;
-  updateMenuPosition();
-}
-
 onMounted(() => {
   document.addEventListener("pointerdown", onDocumentPointer, true);
   document.addEventListener("keydown", onKeydown);
-  window.addEventListener("resize", onViewportChange);
-  window.addEventListener("scroll", onViewportChange, true);
+  window.addEventListener("resize", updateMenuPosition);
+  window.addEventListener("scroll", updateMenuPosition, true);
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener("pointerdown", onDocumentPointer, true);
   document.removeEventListener("keydown", onKeydown);
-  window.removeEventListener("resize", onViewportChange);
-  window.removeEventListener("scroll", onViewportChange, true);
+  window.removeEventListener("resize", updateMenuPosition);
+  window.removeEventListener("scroll", updateMenuPosition, true);
 });
 </script>
 
 <template>
-  <div ref="anchorRef" class="move-menu-anchor">
+  <div ref="anchorRef" class="priority-menu-anchor">
     <IconButton
-      title="Переместить в кластер"
-      :disabled="!targets.length"
+      title="Выбрать итоговое значение из конфликтующих"
+      class="priority-menu-trigger"
       @click.stop="toggle"
     >
-      <ArrowRightLeft aria-hidden="true" />
+      <ChevronDown aria-hidden="true" />
     </IconButton>
     <Teleport to="body">
-      <Transition name="move-menu-fade">
-        <div
-          v-if="open"
-          ref="menuRef"
-          class="move-menu move-menu--floating"
-          role="menu"
-          aria-label="Выбор кластера"
-          :style="menuStyle"
-          @click.stop
+      <div
+        v-if="open"
+        ref="menuRef"
+        class="priority-menu"
+        :style="menuStyle"
+        @click.stop
+      >
+        <button
+          v-for="value in values"
+          :key="value"
+          type="button"
+          class="priority-menu__item"
+          :class="{ 'priority-menu__item--active': value === currentValue }"
+          @click="pick(value)"
         >
-          <button
-            v-for="target in targets"
-            :key="target.index"
-            type="button"
-            class="move-menu__item"
-            role="menuitem"
-            @click="pick(target.index)"
-          >
-            {{ target.name }}
-          </button>
-        </div>
-      </Transition>
+          {{ value }}
+        </button>
+      </div>
     </Teleport>
   </div>
 </template>

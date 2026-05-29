@@ -26,7 +26,9 @@ def test_clusters_from_known_items_groups_by_cluster_name() -> None:
     filters = next(c for c in clusters if c["name"] == "Фильтры топливные")
     assert len(filters["items"]) == 2
     assert filters["rows"][0]["values"]["артикул"] == "P1"
+    assert filters["rows"][0]["source"] == "memory"
     assert filters["rows"][1]["values"]["артикул"] == "P2"
+    assert filters["rows"][1]["source"] == "memory"
 
 
 def test_build_default_clusters_merges_known_into_one_cluster() -> None:
@@ -53,3 +55,24 @@ def test_build_default_clusters_merges_known_into_one_cluster() -> None:
     assert clusters[0]["name"] == "Группа 1"
     assert clusters[0]["items"] == ["A", "B"]
     assert len(clusters[0]["rows"]) == 2
+    assert all(row["source"] == "memory" for row in clusters[0]["rows"])
+
+
+def test_build_default_clusters_marks_new_clusters_as_ai() -> None:
+    result = {
+        "base_attributes": ["бренд"],
+        "new_item_clusters": [
+            {
+                "category": "Фильтры",
+                "attributes": ["бренд"],
+                "cluster_items": ["A", "B"],
+            }
+        ],
+        "known_items": [],
+    }
+
+    clusters = _build_default_clusters(result)
+
+    assert len(clusters) == 1
+    assert clusters[0]["rows"][0]["source"] == "ai"
+    assert clusters[0]["rows"][1]["source"] == "ai"
