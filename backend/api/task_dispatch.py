@@ -82,6 +82,14 @@ async def dispatch_clusterize(
     background_tasks: BackgroundTasks,
 ) -> TaskCreateResponse:
     embedding_provider, embedding_client = _get_embedding_client(request, body.embedding_provider)
+    _, local_embedding_client = _get_embedding_client(request, EmbeddingProvider.LOCAL)
+    gemini_embedding_client = None
+    try:
+        _gemini_provider, gemini_embedding_client = _get_embedding_client(
+            request, EmbeddingProvider.GEMINI
+        )
+    except HTTPException:
+        logger.warning("Gemini embedding client is unavailable for dual lookup")
     llm_provider, llm_client = _get_llm_client(request, body.cluster_profile_provider.value)
     task_id = str(uuid.uuid4())
     await create_task(
@@ -99,6 +107,8 @@ async def dispatch_clusterize(
         task_id,
         body,
         embedding_client,
+        local_embedding_client,
+        gemini_embedding_client,
         request.app.state.vector_db,
         llm_client,
         request.app.state.clusterizer,
@@ -154,24 +164,74 @@ async def dispatch_memory_save(
         original_items_list: list[list[str]] = [
             list(item.original_items or []) for item in body.items
         ]
+        original_item_values_list: list[dict[str, dict[str, Any]]] = [
+            {
+                str(alias): {
+                    str(k): v for k, v in dict(values or {}).items() if str(k).strip()
+                }
+                for alias, values in dict(item.original_item_values or {}).items()
+                if str(alias).strip()
+            }
+            for item in body.items
+        ]
+        attribute_merge_list: list[dict[str, str]] = [
+            {str(k): str(v) for k, v in dict(item.attribute_merge or {}).items()}
+            for item in body.items
+        ]
+        attribute_merge_separators_list: list[dict[str, str]] = [
+            {str(k): str(v) for k, v in dict(item.attribute_merge_separators or {}).items()}
+            for item in body.items
+        ]
         try:
-            provider = EmbeddingProvider(embedding_provider.strip().lower())
+            preferred_provider = EmbeddingProvider(embedding_provider.strip().lower())
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        _, embedding_client = _get_embedding_client(request, provider)
-        vectors: list[list[float]] = await asyncio.to_thread(
-            embedding_client.get_embeddings,
+
+        _, local_embedding_client = _get_embedding_client(request, EmbeddingProvider.LOCAL)
+        local_vectors: list[list[float]] = await asyncio.to_thread(
+            local_embedding_client.get_embeddings,
             texts,
         )
+        if texts and not local_vectors:
+            raise RuntimeError("Local embeddings are required for memory save")
+
+        gemini_vectors: list[list[float]] | None = None
+        try:
+            _, gemini_embedding_client = _get_embedding_client(request, EmbeddingProvider.GEMINI)
+            gemini_vectors = await asyncio.to_thread(
+                gemini_embedding_client.get_embeddings,
+                texts,
+            )
+            if gemini_vectors and len(gemini_vectors) != len(texts):
+                logger.warning(
+                    "Gemini embeddings length mismatch (%s != %s), skip Gemini vectors",
+                    len(gemini_vectors),
+                    len(texts),
+                )
+                gemini_vectors = None
+        except Exception:
+            logger.warning("Gemini embeddings unavailable during memory save", exc_info=True)
+            gemini_vectors = None
+
         await asyncio.to_thread(
             request.app.state.vector_db.save_items,
             texts,
-            vectors,
+            local_vectors,
+            gemini_vectors,
             attributes,
             cluster_names,
             original_items_list,
+            original_item_values_list,
+            attribute_merge_list,
+            attribute_merge_separators_list,
         )
-        logger.info("Saved %s items to vector memory", len(texts))
+        logger.info(
+            "Saved %s items to vector memory (preferred=%s, local=%s, gemini=%s)",
+            len(texts),
+            preferred_provider.value,
+            len(local_vectors),
+            len(gemini_vectors or []),
+        )
         return MemorySaveResponse(saved_count=len(texts))
     except Exception as exc:
         logger.exception("Failed to save items to vector memory")

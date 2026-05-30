@@ -1,14 +1,22 @@
 <script setup>
-import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { ArrowRightLeft } from "@lucide/vue";
 import IconButton from "./IconButton.vue";
 import { computeFloatingMenuPosition } from "../utils/floatingMenuPosition";
 
 const props = defineProps({
   targets: { type: Array, default: () => [] },
+  buttonLabel: { type: String, default: "" },
+  buttonTitle: { type: String, default: "Переместить в кластер" },
+  buttonIcon: { type: [Object, Function], default: null },
+  buttonClass: {
+    type: String,
+    default: "btn-with-icon btn-with-icon--secondary btn-with-icon--mini",
+  },
 });
 
 const emit = defineEmits(["select"]);
+const iconComponent = computed(() => props.buttonIcon || ArrowRightLeft);
 
 const open = ref(false);
 const anchorRef = ref(null);
@@ -44,7 +52,8 @@ function pick(targetClusterIdx) {
 function onDocumentPointer(event) {
   if (!open.value) return;
   const target = event.target;
-  if (anchorRef.value?.contains(target) || menuRef.value?.contains(target)) return;
+  if (anchorRef.value?.contains(target) || menuRef.value?.contains(target))
+    return;
   open.value = false;
 }
 
@@ -74,12 +83,29 @@ onBeforeUnmount(() => {
 
 <template>
   <div ref="anchorRef" class="move-menu-anchor">
-    <IconButton
-      title="Переместить в кластер"
+    <button
+      v-if="buttonLabel"
+      type="button"
+      :class="buttonClass"
+      :title="buttonTitle"
       :disabled="!targets.length"
       @click.stop="toggle"
     >
-      <ArrowRightLeft aria-hidden="true" />
+      <component
+        :is="buttonIcon"
+        v-if="buttonIcon"
+        class="move-menu-trigger-icon"
+        aria-hidden="true"
+      />
+      {{ buttonLabel }}
+    </button>
+    <IconButton
+      v-else
+      :title="buttonTitle"
+      :disabled="!targets.length"
+      @click.stop="toggle"
+    >
+      <component :is="iconComponent" class="move-menu-trigger-icon" aria-hidden="true" />
     </IconButton>
     <Teleport to="body">
       <Transition name="move-menu-fade">
@@ -98,7 +124,7 @@ onBeforeUnmount(() => {
             type="button"
             class="move-menu__item"
             role="menuitem"
-            @click="pick(target.index)"
+            @click="pick(target.value ?? target.index)"
           >
             {{ target.name }}
           </button>

@@ -71,6 +71,10 @@ class ClusterInput(BaseModel):
         default_factory=dict,
         description="Источник строки: memory|ai по исходной номенклатуре",
     )
+    item_values: dict[str, dict[str, str]] = Field(
+        default_factory=dict,
+        description="Известные значения атрибутов по item (используется для memory skip)",
+    )
     attribute_merge: dict[str, str] = Field(
         default_factory=dict,
         description="Режим слияния атрибутов: priority|accumulative",
@@ -88,6 +92,22 @@ class NormalizeRequest(BaseModel):
     llm_provider: NormalizeProvider = Field(
         ...,
         description="Провайдер LLM для нормализации: g4f|gemini",
+    )
+    resume_completed_cluster_indexes: list[int] = Field(
+        default_factory=list,
+        description="Индексы уже обработанных кластеров (для resume).",
+    )
+    resume_seed_normalized: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Накопленные normalized-строки из partial результата.",
+    )
+    resume_seed_clusters_collapsed: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Накопленные collapsed-кластеры из partial результата.",
+    )
+    resume_expected_count: int | None = Field(
+        default=None,
+        description="Ожидаемое количество позиций из предыдущего partial (если есть).",
     )
 
 

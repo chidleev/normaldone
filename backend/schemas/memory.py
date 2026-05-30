@@ -17,6 +17,18 @@ class MemoryItem(BaseModel):
         default_factory=list,
         description="Исходные номенклатуры",
     )
+    original_item_values: dict[str, dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Значения атрибутов по каждой исходной номенклатуре",
+    )
+    attribute_merge: dict[str, str] = Field(
+        default_factory=dict,
+        description="Режимы слияния атрибутов для кластера",
+    )
+    attribute_merge_separators: dict[str, str] = Field(
+        default_factory=dict,
+        description="Разделители для аккумулятивных атрибутов",
+    )
 
 
 class MemorySaveRequest(BaseModel):

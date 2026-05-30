@@ -6,7 +6,9 @@ import asyncio
 import csv
 import io
 import json
+import re
 import uuid
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -87,6 +89,9 @@ class StartTaskPayload(BaseModel):
     session_id: str
     base_url: str = Field(default="http://127.0.0.1:8000")
     provider: str | None = None
+    mode: str = Field(default="start", description="start|resume|restart")
+    cluster_indexes: list[int] = Field(default_factory=list)
+    cluster_attribute_mode: str = Field(default="default", description="default|all|missing")
 
 
 class ClusterizeStartPayload(BaseModel):
@@ -110,6 +115,7 @@ class ClustersPayload(BaseModel):
 class SaveMemoryPayload(BaseModel):
     session_id: str
     base_url: str = Field(default="http://127.0.0.1:8000")
+    cluster_index: int | None = None
 
 
 class SessionPayload(BaseModel):
@@ -162,6 +168,23 @@ class ColumnRenamePayload(BaseModel):
 class ColumnDeletePayload(BaseModel):
     session_id: str
     column_name: str
+
+
+class MemoryClusterLoadPayload(BaseModel):
+    cluster_name: str
+
+
+class MemoryClusterDeletePayload(BaseModel):
+    cluster_name: str
+
+
+class MemoryItemDeletePayload(BaseModel):
+    text: str
+
+
+class MemorySearchPayload(BaseModel):
+    query: str
+    limit: int = Field(default=20, ge=1, le=100)
 
 
 def _get_session(session_id: str) -> SessionData:
@@ -338,11 +361,122 @@ def _apply_collapsed_clusters(session: SessionData) -> None:
     session.approved_clusters = updated
 
 
+def _normalize_mode(raw_mode: str | None) -> str:
+    mode = str(raw_mode or "start").strip().lower()
+    if mode not in {"start", "resume", "restart"}:
+        raise HTTPException(status_code=400, detail="mode must be start|resume|restart")
+    return mode
+
+
+def _build_normalize_clusters_payload(session: SessionData) -> list[ClusterInput]:
+    """Преобразует approved_clusters в payload для NormalizeRequest."""
+    clusters: list[ClusterInput] = []
+    for cluster in session.approved_clusters:
+        item_sources: dict[str, str] = {}
+        item_values: dict[str, dict[str, str]] = {}
+        items: list[str] = []
+        seen_items: set[str] = set()
+        for row in cluster.get("rows") or []:
+            row_source = str(row.get("source") or "ai").strip().lower()
+            source = row_source if row_source in ("memory", "ai") else "ai"
+            row_values = {
+                str(key).strip(): str(value).strip()
+                for key, value in dict(row.get("values") or {}).items()
+                if str(key).strip()
+            }
+            members = row.get("members") or []
+            if members:
+                for member in members:
+                    item_name = str(member.get("item", "")).strip()
+                    if not item_name:
+                        continue
+                    if item_name not in seen_items:
+                        seen_items.add(item_name)
+                        items.append(item_name)
+                    member_source_raw = str(member.get("source") or source).strip().lower()
+                    item_sources[item_name] = (
+                        member_source_raw if member_source_raw in ("memory", "ai") else source
+                    )
+                    item_values[item_name] = {
+                        str(key).strip(): str(value).strip()
+                        for key, value in dict(member.get("values") or row_values).items()
+                        if str(key).strip()
+                    }
+                continue
+
+            item_name = str(row.get("item", "")).strip()
+            if not item_name:
+                continue
+            if item_name not in seen_items:
+                seen_items.add(item_name)
+                items.append(item_name)
+            item_sources[item_name] = source
+            item_values[item_name] = dict(row_values)
+        if not items:
+            items = [str(i).strip() for i in cluster.get("items", []) if str(i).strip()]
+            for item_name in items:
+                item_sources[item_name] = "ai"
+                item_values[item_name] = {}
+        attribute_merge = _normalize_attribute_merge(cluster.get("attribute_merge"))
+        attribute_merge_separators = _normalize_attribute_merge_separators(
+            cluster.get("attribute_merge_separators")
+        )
+        clusters.append(
+            ClusterInput(
+                name=str(cluster.get("name", "")).strip() or "Cluster",
+                attributes=[str(a).strip() for a in cluster.get("attributes", []) if str(a).strip()],
+                items=items,
+                enriched_name_template=str(cluster.get("enriched_name_template") or "").strip(),
+                item_sources=item_sources,
+                item_values=item_values,
+                attribute_merge=attribute_merge,
+                attribute_merge_separators=attribute_merge_separators,
+            )
+        )
+    return clusters
+
+
+def _extract_resume_indexes(result: dict[str, Any], total_clusters: int) -> list[int]:
+    """Возвращает валидированные индексы обработанных кластеров."""
+    indexes: list[int] = []
+    for index in list(result.get("completed_cluster_indexes") or []):
+        try:
+            value = int(index)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= value < total_clusters and value not in indexes:
+            indexes.append(value)
+    return sorted(indexes)
+
+
+def _normalize_cluster_attribute_mode(raw_mode: str | None) -> str:
+    mode = str(raw_mode or "default").strip().lower()
+    if mode not in {"default", "all", "missing"}:
+        raise HTTPException(status_code=400, detail="cluster_attribute_mode must be default|all|missing")
+    return mode
+
+
+def _normalize_selected_cluster_indexes(raw_indexes: list[int], total_clusters: int) -> list[int]:
+    if not raw_indexes:
+        return list(range(total_clusters))
+    indexes: list[int] = []
+    for raw in raw_indexes:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="cluster_indexes must contain integers") from None
+        if value < 0 or value >= total_clusters:
+            raise HTTPException(status_code=400, detail=f"cluster index out of range: {value}")
+        if value not in indexes:
+            indexes.append(value)
+    return indexes
+
+
 def _clusters_from_known_items(
     known_items: list[dict[str, Any]],
     base_attributes: list[str],
 ) -> list[dict[str, Any]]:
-    """Группирует позиции из памяти по cluster_name с заполненными values."""
+    """Группирует позиции из памяти по cluster_name в enriched-формате."""
     from collections import defaultdict
 
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -358,10 +492,13 @@ def _clusters_from_known_items(
     clusters: list[dict[str, Any]] = []
     for cluster_name, group in groups.items():
         attr_keys: list[str] = []
-        rows: list[dict[str, Any]] = []
-        items: list[str] = []
+        rows_by_enriched: dict[str, dict[str, Any]] = {}
+        cluster_attribute_merge: dict[str, str] = {}
+        cluster_attribute_merge_separators: dict[str, str] = {}
         for known in group:
             item_name = str(known.get("item", "")).strip()
+            if not item_name:
+                continue
             attrs = known.get("attributes")
             values: dict[str, str] = {}
             if isinstance(attrs, dict):
@@ -370,11 +507,87 @@ def _clusters_from_known_items(
                     for key, value in attrs.items()
                     if str(key).strip()
                 }
+            known_attribute_merge = _normalize_attribute_merge(known.get("attribute_merge"))
+            for key, value in known_attribute_merge.items():
+                if key not in cluster_attribute_merge:
+                    cluster_attribute_merge[key] = value
+            known_attribute_merge_separators = _normalize_attribute_merge_separators(
+                known.get("attribute_merge_separators")
+            )
+            for key, value in known_attribute_merge_separators.items():
+                if key not in cluster_attribute_merge_separators:
+                    cluster_attribute_merge_separators[key] = value
             for key in values:
                 if key not in attr_keys:
                     attr_keys.append(key)
-            items.append(item_name)
-            rows.append({"item": item_name, "values": values, "source": "memory"})
+            original_item_values = {
+                str(alias).strip(): {
+                    str(key).strip(): str(value).strip()
+                    for key, value in dict(member_values or {}).items()
+                    if str(key).strip()
+                }
+                for alias, member_values in dict(known.get("original_item_values") or {}).items()
+                if str(alias).strip()
+            }
+            enriched_name = (
+                str(known.get("enriched_name") or known.get("text") or "").strip() or item_name
+            )
+            originals = [
+                str(alias).strip()
+                for alias in known.get("original_items") or []
+                if str(alias).strip()
+            ]
+            aliases = originals or [item_name]
+            row = rows_by_enriched.get(enriched_name)
+            if row is None:
+                row = {
+                    "enriched_name": enriched_name,
+                    "aliases": [],
+                    "item": aliases[0],
+                    "values": dict(values),
+                    "source": "memory",
+                    "members": [],
+                }
+                rows_by_enriched[enriched_name] = row
+            else:
+                merged_values = dict(row.get("values") or {})
+                for key, value in values.items():
+                    if key not in merged_values or not str(merged_values[key]).strip():
+                        merged_values[key] = value
+                row["values"] = merged_values
+
+            existing_aliases = list(row.get("aliases") or [])
+            for alias in aliases:
+                if alias not in existing_aliases:
+                    existing_aliases.append(alias)
+            row["aliases"] = existing_aliases
+            members = list(row.get("members") or [])
+            member_by_item = {str(member.get("item", "")).strip(): member for member in members}
+            for alias in aliases:
+                alias_values = dict(original_item_values.get(alias) or values)
+                for key in alias_values:
+                    if key not in attr_keys:
+                        attr_keys.append(key)
+                existing_member = member_by_item.get(alias)
+                if alias and existing_member is None:
+                    members.append(
+                        {
+                            "item": alias,
+                            "values": alias_values,
+                            "source": "memory",
+                        }
+                    )
+                    member_by_item[alias] = members[-1]
+                elif alias and existing_member is not None:
+                    merged_member_values = dict(existing_member.get("values") or {})
+                    for key, value in alias_values.items():
+                        if key not in merged_member_values or not str(merged_member_values[key]).strip():
+                            merged_member_values[key] = value
+                    existing_member["values"] = merged_member_values
+            row["members"] = members
+
+        rows = list(rows_by_enriched.values())
+        items = [str(row.get("enriched_name") or "").strip() for row in rows if row.get("enriched_name")]
         template = ""
         for known in group:
             candidate = str(known.get("name_template") or "").strip()
@@ -388,6 +601,10 @@ def _clusters_from_known_items(
                 "enriched_name_template": template,
                 "items": items,
                 "rows": rows,
+                "attribute_merge": cluster_attribute_merge,
+                "attribute_merge_separators": cluster_attribute_merge_separators,
+                "source": "memory",
+                "memory_cluster_name": cluster_name,
             }
         )
     return clusters
@@ -412,6 +629,8 @@ def _build_default_clusters(clusterize_result: dict[str, Any] | None) -> list[di
                     {"item": item_name, "values": {}, "source": "ai"}
                     for item_name in cluster_items
                 ],
+                "source": "ai",
+                "memory_cluster_name": "",
             }
         )
     clusters.extend(
@@ -430,6 +649,10 @@ def _memory_item_names(session: SessionData) -> set[str]:
         item_name = str(known.get("item", "")).strip()
         if item_name:
             names.add(item_name)
+        for alias in known.get("original_items") or []:
+            alias_name = str(alias).strip()
+            if alias_name:
+                names.add(alias_name)
     return names
 
 
@@ -525,6 +748,8 @@ def _clusters_for_ui(session: SessionData) -> list[dict[str, Any]]:
                     "attribute_merge_separators": attribute_merge_separators,
                     "items": [row["enriched_name"] for row in rows],
                     "rows": rows,
+                    "source": _cluster_source(cluster),
+                    "memory_cluster_name": str(cluster.get("memory_cluster_name") or "").strip(),
                 }
             )
         return payload
@@ -575,9 +800,195 @@ def _clusters_for_ui(session: SessionData) -> list[dict[str, Any]]:
                 ).strip(),
                 "items": items,
                 "rows": rows,
+                "source": _cluster_source(cluster),
+                "memory_cluster_name": str(cluster.get("memory_cluster_name") or "").strip(),
             }
         )
     return payload
+
+
+def _cluster_source(cluster: dict[str, Any]) -> str:
+    source = str(cluster.get("source") or "").strip().lower()
+    if source in ("memory", "ai", "manual"):
+        return source
+    row_sources = {
+        str(row.get("source") or "").strip().lower()
+        for row in cluster.get("rows") or []
+        if str(row.get("source") or "").strip().lower() in ("memory", "ai")
+    }
+    if row_sources == {"memory"}:
+        return "memory"
+    if row_sources == {"ai"}:
+        return "ai"
+    if row_sources:
+        return "manual"
+    return "ai"
+
+
+def _cluster_from_memory_points(
+    cluster_name: str,
+    points: list[dict[str, Any]],
+    base_attributes: list[str],
+) -> dict[str, Any]:
+    cluster_attribute_merge: dict[str, str] = {}
+    cluster_attribute_merge_separators: dict[str, str] = {}
+    attr_keys: list[str] = []
+    rows_by_enriched: dict[str, dict[str, Any]] = {}
+    for point in points:
+        enriched = str(point.get("text") or "").strip()
+        if not enriched:
+            continue
+        if not cluster_attribute_merge:
+            cluster_attribute_merge = _normalize_attribute_merge(point.get("attribute_merge"))
+        if not cluster_attribute_merge_separators:
+            cluster_attribute_merge_separators = _normalize_attribute_merge_separators(
+                point.get("attribute_merge_separators")
+            )
+        originals = [
+            str(alias).strip()
+            for alias in point.get("original_items") or []
+            if str(alias).strip()
+        ]
+        if not originals:
+            originals = [enriched]
+        values = {
+            str(key).strip(): str(value).strip()
+            for key, value in dict(point.get("attributes") or {}).items()
+            if str(key).strip()
+        }
+        for key in values:
+            if key not in attr_keys:
+                attr_keys.append(key)
+        original_item_values = {
+            str(alias).strip(): {
+                str(key).strip(): str(value).strip()
+                for key, value in dict(item_values or {}).items()
+                if str(key).strip()
+            }
+            for alias, item_values in dict(point.get("original_item_values") or {}).items()
+            if str(alias).strip()
+        }
+        row = rows_by_enriched.get(enriched)
+        if row is None:
+            row = {
+                "enriched_name": enriched,
+                "aliases": [],
+                "item": originals[0],
+                "values": dict(values),
+                "source": "memory",
+                "members": [],
+            }
+            rows_by_enriched[enriched] = row
+        existing_aliases = list(row.get("aliases") or [])
+        existing_members = list(row.get("members") or [])
+        existing_member_by_item = {
+            str(member.get("item", "")).strip(): member
+            for member in existing_members
+            if str(member.get("item", "")).strip()
+        }
+        for alias in originals:
+            if alias not in existing_aliases:
+                existing_aliases.append(alias)
+            member_values = dict(original_item_values.get(alias) or values)
+            for key in member_values:
+                if key not in attr_keys:
+                    attr_keys.append(key)
+            current_member = existing_member_by_item.get(alias)
+            if current_member is None:
+                existing_members.append(
+                    {
+                        "item": alias,
+                        "values": member_values,
+                        "source": "memory",
+                    }
+                )
+                existing_member_by_item[alias] = existing_members[-1]
+            else:
+                merged_member_values = dict(current_member.get("values") or {})
+                for key, value in member_values.items():
+                    if key not in merged_member_values or not str(merged_member_values[key]).strip():
+                        merged_member_values[key] = value
+                current_member["values"] = merged_member_values
+        row["aliases"] = existing_aliases
+        row["members"] = existing_members
+    rows = list(rows_by_enriched.values())
+    if rows:
+        return {
+            "name": cluster_name,
+            "attributes": attr_keys or list(base_attributes),
+            "enriched_name_template": "",
+            "items": [str(row.get("enriched_name") or "").strip() for row in rows if row.get("enriched_name")],
+            "rows": rows,
+            "attribute_merge": cluster_attribute_merge,
+            "attribute_merge_separators": cluster_attribute_merge_separators,
+            "source": "memory",
+            "memory_cluster_name": cluster_name,
+        }
+    return {
+        "name": cluster_name,
+        "attributes": list(base_attributes),
+        "enriched_name_template": "",
+        "items": [],
+        "rows": [],
+        "attribute_merge": cluster_attribute_merge,
+        "attribute_merge_separators": cluster_attribute_merge_separators,
+        "source": "memory",
+        "memory_cluster_name": cluster_name,
+    }
+
+
+def _normalized_map(session: SessionData) -> dict[str, dict[str, Any]]:
+    normalized = (session.normalize_result or {}).get("normalized") or []
+    return {
+        str(row.get("item", "")).strip(): dict(row.get("values", {}))
+        for row in normalized
+        if str(row.get("item", "")).strip()
+    }
+
+
+def _cluster_export_rows(
+    cluster: dict[str, Any],
+    normalized_map: dict[str, dict[str, Any]],
+) -> tuple[list[str], list[list[str]]]:
+    attributes = [str(a).strip() for a in cluster.get("attributes", []) if str(a).strip()]
+    rows_out: list[list[str]] = []
+    items = [str(i).strip() for i in cluster.get("items", []) if str(i).strip()]
+    for row in cluster.get("rows") or []:
+        enriched = str(row.get("enriched_name") or "").strip()
+        aliases = row.get("aliases") or []
+        if enriched:
+            values = dict(row.get("values") or {})
+            for alias in aliases:
+                values = {**values, **normalized_map.get(str(alias).strip(), {})}
+            originals = "; ".join(str(a).strip() for a in aliases if str(a).strip())
+            rows_out.append(
+                [
+                    enriched,
+                    originals,
+                    *[str(values.get(attr, "")).strip() for attr in attributes],
+                ]
+            )
+            continue
+    for item_name in items:
+        values = normalized_map.get(item_name, {})
+        rows_out.append(
+            [item_name, item_name, *[str(values.get(attr, "")).strip() for attr in attributes]]
+        )
+    return attributes, rows_out
+
+
+def _get_cluster_for_export(session: SessionData, cluster_index: int) -> dict[str, Any]:
+    clusters = session.approved_clusters or []
+    if not clusters:
+        raise HTTPException(status_code=400, detail="No clusters to export")
+    if cluster_index < 0 or cluster_index >= len(clusters):
+        raise HTTPException(status_code=400, detail="Cluster index out of range")
+    return clusters[cluster_index]
+
+
+def _safe_filename(name: str, fallback: str) -> str:
+    cleaned = re.sub(r"[\\/:*?\"<>|]+", "_", str(name).strip())
+    return cleaned or fallback
 
 
 @router.post("/ui/api/session/new")
@@ -870,45 +1281,93 @@ async def start_normalize(
         raise HTTPException(status_code=400, detail="Approve clusters first")
     if payload.provider:
         session.normalize_provider = _validate_llm_provider(payload.provider)
-    clusters = []
-    for cluster in session.approved_clusters:
-        item_sources: dict[str, str] = {}
-        items: list[str] = []
-        for row in cluster.get("rows") or []:
-            item_name = str(row.get("item", "")).strip()
-            if not item_name:
-                continue
-            items.append(item_name)
-            source = str(row.get("source") or "ai").strip().lower()
-            item_sources[item_name] = source if source in ("memory", "ai") else "ai"
-        if not items:
-            items = [str(i).strip() for i in cluster.get("items", []) if str(i).strip()]
-        attribute_merge = _normalize_attribute_merge(cluster.get("attribute_merge"))
-        attribute_merge_separators = _normalize_attribute_merge_separators(
-            cluster.get("attribute_merge_separators")
-        )
-        clusters.append(
-            ClusterInput(
-                name=str(cluster.get("name", "")).strip() or "Cluster",
-                attributes=[
-                    str(a).strip() for a in cluster.get("attributes", []) if str(a).strip()
-                ],
-                items=items,
-                enriched_name_template=str(
-                    cluster.get("enriched_name_template") or ""
-                ).strip(),
-                item_sources=item_sources,
-                attribute_merge=attribute_merge,
-                attribute_merge_separators=attribute_merge_separators,
+    mode = _normalize_mode(payload.mode)
+    cluster_attribute_mode = _normalize_cluster_attribute_mode(payload.cluster_attribute_mode)
+    all_clusters = _build_normalize_clusters_payload(session)
+    selected_indexes = _normalize_selected_cluster_indexes(payload.cluster_indexes, len(all_clusters))
+    clusters = [all_clusters[index] for index in selected_indexes]
+    if not clusters:
+        raise HTTPException(status_code=400, detail="No clusters selected for normalization")
+
+    if cluster_attribute_mode in {"all", "missing"}:
+        rewritten: list[ClusterInput] = []
+        for cluster in clusters:
+            all_items = list(cluster.items)
+            if cluster_attribute_mode == "all":
+                item_sources = {item_name: "ai" for item_name in all_items}
+                item_values = {item_name: {} for item_name in all_items}
+            else:
+                item_sources = {item_name: "memory" for item_name in all_items}
+                item_values = {
+                    item_name: dict(cluster.item_values.get(item_name, {}))
+                    for item_name in all_items
+                }
+            rewritten.append(
+                ClusterInput(
+                    name=cluster.name,
+                    attributes=list(cluster.attributes),
+                    items=all_items,
+                    enriched_name_template=cluster.enriched_name_template,
+                    item_sources=item_sources,
+                    item_values=item_values,
+                    attribute_merge=dict(cluster.attribute_merge or {}),
+                    attribute_merge_separators=dict(cluster.attribute_merge_separators or {}),
+                )
             )
-        )
+        clusters = rewritten
+    resume_completed_cluster_indexes: list[int] = []
+    resume_seed_normalized: list[dict[str, Any]] = []
+    resume_seed_clusters_collapsed: list[dict[str, Any]] = []
+    resume_expected_count: int | None = None
+
+    if mode == "restart":
+        session.normalize_result = None
+    elif mode == "resume":
+        previous_task_id = session.normalize_task_id
+        if not previous_task_id:
+            raise HTTPException(status_code=400, detail="No previous normalize task to resume")
+        previous_status = await fetch_task_status(previous_task_id, request)
+        previous_result = dict(previous_status.result or {})
+        if not previous_result:
+            raise HTTPException(status_code=400, detail="No partial result to resume from")
+        resume_completed_cluster_indexes = _extract_resume_indexes(previous_result, len(clusters))
+        if not resume_completed_cluster_indexes:
+            raise HTTPException(
+                status_code=400,
+                detail="Partial result has no completed cluster checkpoints",
+            )
+        resume_seed_normalized = [
+            dict(item)
+            for item in list(previous_result.get("normalized") or [])
+            if isinstance(item, dict)
+        ]
+        resume_seed_clusters_collapsed = [
+            dict(cluster_payload)
+            for cluster_payload in list(previous_result.get("clusters_collapsed") or [])
+            if isinstance(cluster_payload, dict)
+        ]
+        raw_expected = previous_result.get("expected_count")
+        if isinstance(raw_expected, int):
+            resume_expected_count = raw_expected
+
     body = NormalizeRequest(
         clusters=clusters,
         llm_provider=NormalizeProvider(session.normalize_provider),
+        resume_completed_cluster_indexes=resume_completed_cluster_indexes,
+        resume_seed_normalized=resume_seed_normalized,
+        resume_seed_clusters_collapsed=resume_seed_clusters_collapsed,
+        resume_expected_count=resume_expected_count,
     )
     created = await dispatch_normalize(request, body, background_tasks)
     session.normalize_task_id = created.task_id
-    return {"task_id": created.task_id, "status": created.status}
+    return {
+        "task_id": created.task_id,
+        "status": created.status,
+        "mode": mode,
+        "resumed_clusters": len(resume_completed_cluster_indexes),
+        "selected_clusters": len(clusters),
+        "cluster_attribute_mode": cluster_attribute_mode,
+    }
 
 
 @router.get("/ui/api/task/{session_id}/{task_type}")
@@ -922,6 +1381,11 @@ async def get_task_status(session_id: str, task_type: str, request: Request) -> 
 
     status = await fetch_task_status(task_id, request)
     payload = status.model_dump()
+    if task_type == "normalize":
+        partial_result = dict(status.result or {})
+        if partial_result and bool(partial_result.get("is_partial")):
+            session.normalize_result = partial_result
+            _apply_collapsed_clusters(session)
     if status.status != "COMPLETED":
         return payload
     if task_type == "clusterize":
@@ -939,6 +1403,106 @@ async def get_clusters(session_id: str) -> dict[str, Any]:
     return {"clusters": _clusters_for_ui(_get_session(session_id))}
 
 
+@router.get("/ui/api/memory/clusters")
+async def list_memory_clusters(request: Request) -> dict[str, Any]:
+    clusters = await asyncio.to_thread(request.app.state.vector_db.list_memory_clusters)
+    return {"clusters": clusters}
+
+
+@router.post("/ui/api/memory/cluster/delete")
+async def delete_memory_cluster(payload: MemoryClusterDeletePayload, request: Request) -> dict[str, Any]:
+    cluster_name = str(payload.cluster_name or "").strip()
+    if not cluster_name:
+        raise HTTPException(status_code=400, detail="cluster_name is required")
+    deleted = await asyncio.to_thread(request.app.state.vector_db.delete_cluster_items, cluster_name)
+    if deleted <= 0:
+        raise HTTPException(status_code=404, detail="Memory cluster not found")
+    return {"deleted_count": deleted, "cluster_name": cluster_name}
+
+
+@router.post("/ui/api/memory/item/delete")
+async def delete_memory_item(payload: MemoryItemDeletePayload, request: Request) -> dict[str, Any]:
+    text = str(payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    deleted = await asyncio.to_thread(request.app.state.vector_db.delete_item_by_text, text)
+    if deleted <= 0:
+        raise HTTPException(status_code=404, detail="Memory item not found")
+    return {"deleted_count": deleted, "text": text}
+
+
+@router.post("/ui/api/memory/search")
+async def search_memory(payload: MemorySearchPayload, request: Request) -> dict[str, Any]:
+    query = str(payload.query or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+    query_vectors = await asyncio.to_thread(request.app.state.vectorizer.get_embeddings, [query])
+    if not query_vectors:
+        return {"items": []}
+    matches = await asyncio.to_thread(
+        request.app.state.vector_db.search_local,
+        query_vectors[0],
+        payload.limit,
+        0.0,
+    )
+    return {"items": matches}
+
+
+@router.post("/ui/api/clusters/{session_id}/memory/load")
+async def load_memory_cluster(
+    session_id: str,
+    payload: MemoryClusterLoadPayload,
+    request: Request,
+) -> dict[str, Any]:
+    session = _get_session(session_id)
+    cluster_name = str(payload.cluster_name or "").strip()
+    if not cluster_name:
+        raise HTTPException(status_code=400, detail="cluster_name is required")
+    points = await asyncio.to_thread(request.app.state.vector_db.load_cluster_items, cluster_name)
+    if not points:
+        raise HTTPException(status_code=404, detail="Memory cluster not found")
+    cluster = _cluster_from_memory_points(cluster_name, points, session.base_attributes)
+
+    existing_idx = next(
+        (
+            idx
+            for idx, current in enumerate(session.approved_clusters or [])
+            if str(current.get("memory_cluster_name") or "").strip() == cluster_name
+        ),
+        None,
+    )
+    if existing_idx is None:
+        session.approved_clusters.append(cluster)
+        existing_idx = len(session.approved_clusters) - 1
+    else:
+        session.approved_clusters[existing_idx] = cluster
+    return {"cluster": _clusters_for_ui(session)[existing_idx], "cluster_index": existing_idx}
+
+
+@router.post("/ui/api/clusters/{session_id}/{cluster_index}/memory/load-full")
+async def load_cluster_full_from_memory(
+    session_id: str,
+    cluster_index: int,
+    request: Request,
+) -> dict[str, Any]:
+    session = _get_session(session_id)
+    if cluster_index < 0 or cluster_index >= len(session.approved_clusters):
+        raise HTTPException(status_code=400, detail="Cluster index out of range")
+    cluster = session.approved_clusters[cluster_index]
+    cluster_name = str(cluster.get("memory_cluster_name") or cluster.get("name") or "").strip()
+    if not cluster_name:
+        raise HTTPException(status_code=400, detail="Memory cluster name is empty")
+    points = await asyncio.to_thread(request.app.state.vector_db.load_cluster_items, cluster_name)
+    if not points:
+        raise HTTPException(status_code=404, detail="Memory cluster not found")
+    session.approved_clusters[cluster_index] = _cluster_from_memory_points(
+        cluster_name,
+        points,
+        session.base_attributes,
+    )
+    return {"cluster": _clusters_for_ui(session)[cluster_index], "cluster_index": cluster_index}
+
+
 @router.post("/ui/api/clusters/save")
 async def save_clusters(payload: ClustersPayload) -> dict[str, Any]:
     session = _get_session(payload.session_id)
@@ -946,6 +1510,10 @@ async def save_clusters(payload: ClustersPayload) -> dict[str, Any]:
     memory_items = _memory_item_names(session)
     for cluster in payload.clusters:
         name = str(cluster.get("name", "")).strip() or "Cluster"
+        source = str(cluster.get("source") or "").strip().lower()
+        if source not in ("memory", "ai", "manual"):
+            source = "ai"
+        memory_cluster_name = str(cluster.get("memory_cluster_name") or "").strip()
         attrs = [str(v).strip() for v in cluster.get("attributes", []) if str(v).strip()]
         items = [str(v).strip() for v in cluster.get("items", []) if str(v).strip()]
         if not items:
@@ -1024,6 +1592,8 @@ async def save_clusters(payload: ClustersPayload) -> dict[str, Any]:
                 "attribute_merge_separators": attribute_merge_separators,
                 "items": items,
                 "rows": rows,
+                "source": _cluster_source({"rows": rows, "source": source}),
+                "memory_cluster_name": memory_cluster_name,
             }
         )
     if not valid:
@@ -1088,15 +1658,28 @@ async def rededupe_clusters(session_id: str, request: Request) -> dict[str, Any]
 @router.post("/ui/api/memory/save")
 async def save_memory(payload: SaveMemoryPayload, request: Request) -> dict[str, Any]:
     session = _get_session(payload.session_id)
-    normalized = (session.normalize_result or {}).get("normalized") or []
-    if not normalized:
-        raise HTTPException(status_code=400, detail="Normalize result is empty")
     if not session.approved_clusters:
         raise HTTPException(status_code=400, detail="No clusters to map items to memory")
-    cluster_by_item = _item_cluster_name_map(session.approved_clusters)
+    selected_cluster_index = payload.cluster_index
+    if selected_cluster_index is not None:
+        if selected_cluster_index < 0 or selected_cluster_index >= len(session.approved_clusters):
+            raise HTTPException(status_code=400, detail="Cluster index out of range")
+        clusters_for_save = [session.approved_clusters[selected_cluster_index]]
+    else:
+        clusters_for_save = list(session.approved_clusters)
+    normalized = (session.normalize_result or {}).get("normalized") or []
+    cluster_by_item = _item_cluster_name_map(clusters_for_save)
     items: list[MemoryItem] = []
-    for cluster in session.approved_clusters:
-        cluster_name = str(cluster.get("name", "")).strip() or "Cluster"
+    for cluster in clusters_for_save:
+        cluster_name = (
+            str(cluster.get("memory_cluster_name") or "").strip()
+            or str(cluster.get("name", "")).strip()
+            or "Cluster"
+        )
+        cluster_attribute_merge = _normalize_attribute_merge(cluster.get("attribute_merge"))
+        cluster_attribute_merge_separators = _normalize_attribute_merge_separators(
+            cluster.get("attribute_merge_separators")
+        )
         for row in cluster.get("rows") or []:
             enriched = str(row.get("enriched_name") or "").strip()
             if not enriched:
@@ -1106,15 +1689,37 @@ async def save_memory(payload: SaveMemoryPayload, request: Request) -> dict[str,
                 for alias in row.get("aliases") or []
                 if str(alias).strip()
             ]
+            original_item_values: dict[str, dict[str, Any]] = {}
+            members = row.get("members") or []
+            for member in members:
+                item_name = str(member.get("item", "")).strip()
+                if not item_name:
+                    continue
+                member_values = {
+                    str(key).strip(): str(value).strip()
+                    for key, value in dict(member.get("values") or {}).items()
+                    if str(key).strip()
+                }
+                original_item_values[item_name] = member_values
+            for alias in aliases:
+                if alias not in original_item_values:
+                    original_item_values[alias] = {
+                        str(key).strip(): str(value).strip()
+                        for key, value in dict(row.get("values") or {}).items()
+                        if str(key).strip()
+                    }
             items.append(
                 MemoryItem(
                     text=enriched,
                     attributes=dict(row.get("values") or {}),
                     cluster_name=cluster_name,
                     original_items=aliases or [enriched],
+                    original_item_values=original_item_values,
+                    attribute_merge=cluster_attribute_merge,
+                    attribute_merge_separators=cluster_attribute_merge_separators,
                 )
             )
-    if not items:
+    if not items and normalized:
         for row in normalized:
             item_name = str(row.get("item", "")).strip()
             if not item_name:
@@ -1131,10 +1736,20 @@ async def save_memory(payload: SaveMemoryPayload, request: Request) -> dict[str,
                     attributes=dict(row.get("values", {})),
                     cluster_name=cluster_name,
                     original_items=[item_name],
+                    original_item_values={item_name: dict(row.get("values", {}))},
+                    attribute_merge={},
+                    attribute_merge_separators={},
                 )
             )
     if not items:
         raise HTTPException(status_code=400, detail="No valid normalized items")
+    if selected_cluster_index is not None:
+        cluster_name = (
+            str(clusters_for_save[0].get("memory_cluster_name") or "").strip()
+            or str(clusters_for_save[0].get("name", "")).strip()
+            or "Cluster"
+        )
+        await asyncio.to_thread(request.app.state.vector_db.delete_cluster_items, cluster_name)
     saved = await dispatch_memory_save(
         request,
         MemorySaveRequest(items=items),
@@ -1149,40 +1764,17 @@ async def export_xlsx(session_id: str) -> StreamingResponse:
     clusters = session.approved_clusters or []
     if not clusters:
         raise HTTPException(status_code=400, detail="No clusters to export")
-    normalized = (session.normalize_result or {}).get("normalized") or []
-    normalized_map: dict[str, dict[str, Any]] = {
-        str(row.get("item", "")).strip(): dict(row.get("values", {}))
-        for row in normalized
-        if str(row.get("item", "")).strip()
-    }
+    normalized_map = _normalized_map(session)
 
     wb = Workbook()
     wb.remove(wb.active)
     for idx, cluster in enumerate(clusters, start=1):
         sheet_name = (str(cluster.get("name", "")).strip() or f"Cluster_{idx}")[:31]
         ws = wb.create_sheet(title=sheet_name)
-        attributes = [str(a).strip() for a in cluster.get("attributes", []) if str(a).strip()]
-        items = [str(i).strip() for i in cluster.get("items", []) if str(i).strip()]
+        attributes, rows_out = _cluster_export_rows(cluster, normalized_map)
         ws.append(["Обогащенное наименование", "Исходные номенклатуры", *attributes])
-        for row in cluster.get("rows") or []:
-            enriched = str(row.get("enriched_name") or "").strip()
-            aliases = row.get("aliases") or []
-            if enriched:
-                values = dict(row.get("values") or {})
-                for alias in aliases:
-                    values = {**values, **normalized_map.get(str(alias).strip(), {})}
-                originals = "; ".join(str(a).strip() for a in aliases if str(a).strip())
-                ws.append(
-                    [
-                        enriched,
-                        originals,
-                        *[values.get(attr, "") for attr in attributes],
-                    ]
-                )
-                continue
-        for item_name in items:
-            values = normalized_map.get(item_name, {})
-            ws.append([item_name, item_name, *[values.get(attr, "") for attr in attributes]])
+        for export_row in rows_out:
+            ws.append(export_row)
 
     output = io.BytesIO()
     wb.save(output)
@@ -1191,6 +1783,86 @@ async def export_xlsx(session_id: str) -> StreamingResponse:
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="clusters_export.xlsx"'},
+    )
+
+
+@router.get("/ui/api/export/{session_id}/cluster/{cluster_index}/xlsx")
+async def export_cluster_xlsx(session_id: str, cluster_index: int) -> StreamingResponse:
+    session = _get_session(session_id)
+    cluster = _get_cluster_for_export(session, cluster_index)
+    normalized_map = _normalized_map(session)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = (str(cluster.get("name", "")).strip() or f"Cluster_{cluster_index + 1}")[:31]
+    attributes, rows_out = _cluster_export_rows(cluster, normalized_map)
+    ws.append(["Обогащенное наименование", "Исходные номенклатуры", *attributes])
+    for export_row in rows_out:
+        ws.append(export_row)
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    cluster_name = str(cluster.get("name", "")).strip() or f"cluster_{cluster_index + 1}"
+    filename = f"{cluster_name}.xlsx".replace('"', "")
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/ui/api/export/{session_id}/cluster/{cluster_index}/csv")
+async def export_cluster_csv(session_id: str, cluster_index: int) -> StreamingResponse:
+    session = _get_session(session_id)
+    cluster = _get_cluster_for_export(session, cluster_index)
+    normalized_map = _normalized_map(session)
+    attributes, rows_out = _cluster_export_rows(cluster, normalized_map)
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Обогащенное наименование", "Исходные номенклатуры", *attributes])
+    for export_row in rows_out:
+        writer.writerow(export_row)
+    csv_text = output.getvalue()
+    output.close()
+    data = io.BytesIO(csv_text.encode("utf-8-sig"))
+
+    cluster_name = str(cluster.get("name", "")).strip() or f"cluster_{cluster_index + 1}"
+    filename = f"{cluster_name}.csv".replace('"', "")
+    return StreamingResponse(
+        data,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/ui/api/export/{session_id}/csv")
+async def export_csv_clusters_zip(session_id: str) -> StreamingResponse:
+    session = _get_session(session_id)
+    clusters = session.approved_clusters or []
+    if not clusters:
+        raise HTTPException(status_code=400, detail="No clusters to export")
+    normalized_map = _normalized_map(session)
+
+    archive_stream = io.BytesIO()
+    with zipfile.ZipFile(archive_stream, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for idx, cluster in enumerate(clusters, start=1):
+            attributes, rows_out = _cluster_export_rows(cluster, normalized_map)
+            csv_stream = io.StringIO()
+            writer = csv.writer(csv_stream)
+            writer.writerow(["Обогащенное наименование", "Исходные номенклатуры", *attributes])
+            for export_row in rows_out:
+                writer.writerow(export_row)
+            cluster_name = str(cluster.get("name", "")).strip()
+            safe_name = _safe_filename(cluster_name, f"cluster_{idx}")
+            archive.writestr(f"{idx:02d}_{safe_name}.csv", csv_stream.getvalue().encode("utf-8-sig"))
+
+    archive_stream.seek(0)
+    return StreamingResponse(
+        archive_stream,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="clusters_csv_export.zip"'},
     )
 
 

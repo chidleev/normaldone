@@ -7,15 +7,19 @@ import {
   Layers,
   RotateCcw,
   Save,
+  Search,
   Sparkles,
 } from "@lucide/vue";
 import IconButton from "./IconButton.vue";
+import FormSelectMenu from "./FormSelectMenu.vue";
 
 const props = defineProps({
   backendUrl: { type: String, required: true },
   embeddingProvider: { type: String, required: true },
   profileProvider: { type: String, required: true },
   normalizeProvider: { type: String, required: true },
+  showNormalizeRecoveryActions: { type: Boolean, default: false },
+  clusterCount: { type: Number, default: 0 },
 });
 
 const emit = defineEmits([
@@ -26,11 +30,15 @@ const emit = defineEmits([
   "reset-session",
   "clusterize",
   "normalize",
+  "normalize-resume",
+  "normalize-restart",
   "save-memory",
   "export-xlsx",
+  "export-csv",
   "flush-redis",
   "flush-qdrant",
   "load-test-cluster",
+  "open-memory-search",
 ]);
 </script>
 
@@ -46,45 +54,67 @@ const emit = defineEmits([
           @input="emit('update:backendUrl', $event.target.value)"
         />
       </label>
-      <label class="field">
-        <span>Векторизация</span>
-        <select
-          :value="embeddingProvider"
-          @change="emit('update:embeddingProvider', $event.target.value)"
-        >
-          <option value="local">local</option>
-          <option value="gemini">gemini</option>
-        </select>
-      </label>
-      <label class="field">
-        <span>Профиль кластера</span>
-        <select
-          :value="profileProvider"
-          @change="emit('update:profileProvider', $event.target.value)"
-        >
-          <option value="g4f">g4f</option>
-          <option value="gemini">gemini</option>
-        </select>
-      </label>
-      <label class="field">
-        <span>Нормализация</span>
-        <select
-          :value="normalizeProvider"
-          @change="emit('update:normalizeProvider', $event.target.value)"
-        >
-          <option value="g4f">g4f</option>
-          <option value="gemini">gemini</option>
-        </select>
-      </label>
+      <FormSelectMenu
+        label="Векторизация"
+        :model-value="embeddingProvider"
+        :options="[
+          { value: 'local', label: 'local' },
+          { value: 'gemini', label: 'gemini' },
+        ]"
+        @update:model-value="emit('update:embeddingProvider', $event)"
+      />
+      <FormSelectMenu
+        label="Профиль кластера"
+        :model-value="profileProvider"
+        :options="[
+          { value: 'g4f', label: 'g4f' },
+          { value: 'gemini', label: 'gemini' },
+        ]"
+        @update:model-value="emit('update:profileProvider', $event)"
+      />
+      <FormSelectMenu
+        label="Нормализация"
+        :model-value="normalizeProvider"
+        :options="[
+          { value: 'g4f', label: 'g4f' },
+          { value: 'gemini', label: 'gemini' },
+        ]"
+        @update:model-value="emit('update:normalizeProvider', $event)"
+      />
     </div>
     <div class="toolbar-actions">
       <button class="btn-with-icon" type="button" @click="emit('clusterize')">
         <Layers aria-hidden="true" />
         Кластеризовать
       </button>
-      <button class="btn-with-icon" type="button" @click="emit('normalize')">
+      <button
+        v-if="!showNormalizeRecoveryActions"
+        class="btn-with-icon"
+        type="button"
+        @click="emit('normalize')"
+      >
         <Sparkles aria-hidden="true" />
         Нормализовать
+      </button>
+      <button
+        v-if="showNormalizeRecoveryActions"
+        class="btn-with-icon btn-with-icon--secondary"
+        type="button"
+        title="Продолжить нормализацию с необработанных позиций"
+        @click="emit('normalize-resume')"
+      >
+        <Sparkles aria-hidden="true" />
+        Продолжить
+      </button>
+      <button
+        v-if="showNormalizeRecoveryActions"
+        class="btn-with-icon btn-with-icon--secondary"
+        type="button"
+        title="Запустить нормализацию заново"
+        @click="emit('normalize-restart')"
+      >
+        <RotateCcw aria-hidden="true" />
+        Заново
       </button>
       <button
         class="btn-with-icon btn-with-icon--secondary"
@@ -95,12 +125,36 @@ const emit = defineEmits([
         <FlaskConical aria-hidden="true" />
         Тестовый кластер
       </button>
-      <IconButton title="Сохранить в память" @click="emit('save-memory')">
+      <button
+        v-if="clusterCount >= 2"
+        class="btn-with-icon btn-with-icon--secondary"
+        type="button"
+        title="Сохранить все в Qdrant"
+        @click="emit('save-memory')"
+      >
         <Save aria-hidden="true" />
-      </IconButton>
-      <IconButton title="Экспорт XLSX" @click="emit('export-xlsx')">
+        Qdrant
+      </button>
+      <button
+        v-if="clusterCount >= 2"
+        class="btn-with-icon btn-with-icon--secondary"
+        type="button"
+        title="XLSX (один файл на все кластеры)"
+        @click="emit('export-xlsx')"
+      >
         <Download aria-hidden="true" />
-      </IconButton>
+        XLSX
+      </button>
+      <button
+        v-if="clusterCount >= 2"
+        class="btn-with-icon btn-with-icon--secondary"
+        type="button"
+        title="CSV в ZIP (один файл на кластер)"
+        @click="emit('export-csv')"
+      >
+        <Download aria-hidden="true" />
+        CSV
+      </button>
       <div class="spacer" />
       <IconButton title="Сбросить сессию" danger @click="emit('reset-session')">
         <RotateCcw aria-hidden="true" />

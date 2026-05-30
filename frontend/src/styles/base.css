@@ -53,6 +53,66 @@ body {
     color: var(--muted);
 }
 
+.field-select {
+    position: relative;
+}
+
+.select-menu-trigger {
+    width: 100%;
+    height: 32px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 6px 8px;
+    font-size: 13px;
+    background: #fff;
+    color: #22314b;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.select-menu-trigger svg {
+    width: 14px;
+    height: 14px;
+    color: #6d7f9e;
+}
+
+.select-menu-list {
+    position: fixed;
+    z-index: 1200;
+    min-width: 180px;
+    max-width: 260px;
+    padding: 4px;
+    border: 1px solid #d5deef;
+    border-radius: 8px;
+    background: #fff;
+    box-shadow: 0 8px 24px rgba(20, 35, 70, 0.12);
+}
+
+.select-menu-item {
+    display: block;
+    width: 100%;
+    padding: 6px 8px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #22314b;
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.select-menu-item:hover {
+    background: #eef3ff;
+}
+
+.select-menu-item--active {
+    background: #eef3ff;
+    color: #2748a8;
+}
+
 input[type="text"],
 input[type="file"],
 select,
@@ -270,6 +330,12 @@ button.mini {
     background: #f7f9ff;
 }
 
+.tab-source-icon {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+}
+
 .tab-close {
     display: inline-flex;
     align-items: center;
@@ -293,6 +359,12 @@ button.mini {
     margin-bottom: 8px;
 }
 
+.table-meta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+}
+
 .table-meta h3 {
     margin: 0;
     font-size: 15px;
@@ -303,17 +375,18 @@ button.mini {
 .cluster-title-edit {
     display: inline-grid;
     max-width: min(100%, 42rem);
-    margin: 0 0 2px;
+    margin: 0 0 4px;
     vertical-align: top;
 }
 
 .cluster-title-edit .cell-field-sizer,
 .cluster-title-edit > .cell-edit,
-.cluster-title-edit .draft-text-input > .cell-edit {
-    font-size: 15px;
-    font-weight: 600;
-    line-height: 24px;
-    min-height: 28px;
+.cluster-title-edit .draft-text-input > .cell-edit,
+.cluster-title-input {
+    font-size: 22px !important;
+    font-weight: 800 !important;
+    line-height: 30px !important;
+    min-height: 36px !important;
     color: #22314b;
 }
 
@@ -321,10 +394,25 @@ button.mini {
     background: transparent;
 }
 
+.cluster-template-field {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 0 0 2px;
+    align-items: flex-start;
+}
+
+.cluster-template-label {
+    font-size: 12px;
+    color: #687b9c;
+    font-weight: 600;
+    padding-left: 6px;
+}
+
 .cluster-template-edit {
     display: inline-grid;
     max-width: min(100%, 52rem);
-    margin: 4px 0 2px;
+    margin: 0;
 }
 
 .cluster-template-edit .cell-field-sizer,
@@ -334,6 +422,10 @@ button.mini {
     line-height: 22px;
     min-height: 26px;
     color: #4a5c78;
+}
+
+.cluster-template-input::placeholder {
+    color: #9aa7bd;
 }
 
 .cell-field-box--with-aliases {
@@ -459,6 +551,14 @@ button.mini {
     flex-shrink: 0;
 }
 
+.row-ops-menu__item--danger {
+    color: var(--danger);
+}
+
+.row-ops-menu__item--danger:hover:not(:disabled) {
+    background: #fff0f0;
+}
+
 .row-ops-submenu {
     list-style: none;
     margin: 0 0 4px;
@@ -576,22 +676,41 @@ button.mini {
 .cluster-meta-actions {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 8px;
     flex-wrap: wrap;
 }
 
-.btn-link {
-    border: 0;
-    padding: 0;
-    background: transparent;
-    color: #3b5ccc;
-    font: inherit;
-    cursor: pointer;
-    text-decoration: underline;
+.cluster-meta-actions__danger {
+    margin-left: auto;
 }
 
-.btn-link:hover {
-    color: #2748a8;
+.cluster-deleted-hint {
+    color: #7a5a00;
+    font-size: 12px;
+}
+
+.cluster-export-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.cluster-source-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid #c5d4f5;
+    background: #f7f9ff;
+    color: #3b5ccc;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.cluster-source-badge svg {
+    width: 14px;
+    height: 14px;
 }
 
 .aliases-menu {
@@ -641,6 +760,12 @@ button.mini {
     position: relative;
     display: inline-flex;
     vertical-align: middle;
+}
+
+.move-menu-trigger-icon {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
 }
 
 .move-menu {
@@ -786,8 +911,8 @@ th {
 }
 
 .table-editor--cluster .sticky-check {
-    width: 72px;
-    min-width: 72px;
+    width: 44px;
+    min-width: 44px;
 }
 
 th.sticky-check {
@@ -854,6 +979,13 @@ th.sticky-check {
     text-align: center;
 }
 
+.table-actions-head-icon {
+    width: 16px;
+    height: 16px;
+    color: #6b7a93;
+    vertical-align: middle;
+}
+
 .row-action-cell {
     display: inline-flex;
     align-items: center;
@@ -861,6 +993,24 @@ th.sticky-check {
     gap: 2px;
     height: 24px;
     vertical-align: middle;
+}
+
+tr.table-row--deleted td {
+    background: #faf3f3;
+    color: #8a8f9b;
+}
+
+tr.table-row--deleted td:not(.table-check-cell) {
+    pointer-events: none;
+}
+
+tr.table-row--deleted .cell-static-text {
+    text-decoration: line-through;
+}
+
+tr.table-row--highlight td {
+    background: #d9fff0;
+    transition: background-color 0.4s ease;
 }
 
 tbody td > span,
@@ -922,6 +1072,12 @@ button.ghost.icon-btn--danger:hover:not(:disabled) {
 
 .btn-with-icon--secondary:hover {
     background: #eef3ff;
+}
+
+.btn-with-icon--mini {
+    height: 28px;
+    padding: 0 8px;
+    font-size: 12px;
 }
 
 .col-column--hover {
@@ -1129,6 +1285,53 @@ table input.col-input:focus {
     border-color: var(--primary);
     background: #eef3ff;
     box-shadow: inset 0 0 0 1px #bfd0ff;
+}
+
+.confirm-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 2500;
+    background: rgba(18, 28, 46, 0.38);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+}
+
+.confirm-dialog {
+    width: min(460px, 100%);
+    border: 1px solid #d5deef;
+    border-radius: 12px;
+    background: #fff;
+    box-shadow: 0 12px 28px rgba(20, 35, 70, 0.2);
+    padding: 14px;
+}
+
+.confirm-dialog__title {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 16px;
+    font-weight: 700;
+    color: #1f2d44;
+}
+
+.confirm-dialog__icon {
+    width: 18px;
+    height: 18px;
+    color: #cb7b19;
+}
+
+.confirm-dialog__message {
+    margin: 8px 0 0;
+    color: #3a4a67;
+}
+
+.confirm-dialog__actions {
+    margin-top: 14px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
 }
 
 .sr-file-input {

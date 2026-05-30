@@ -1,16 +1,31 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
-import { MoreHorizontal, RefreshCw, Scissors, Merge } from "@lucide/vue";
+import {
+  ArrowRightLeft,
+  MoreHorizontal,
+  RefreshCw,
+  Scissors,
+  Merge,
+  Trash2,
+} from "@lucide/vue";
 import IconButton from "./IconButton.vue";
 import { computeFloatingMenuPosition } from "../utils/floatingMenuPosition";
 
 const props = defineProps({
   aliases: { type: Array, default: () => [] },
   mergeTargets: { type: Array, default: () => [] },
+  moveTargets: { type: Array, default: () => [] },
   canRegenerate: { type: Boolean, default: true },
+  showEnrichedActions: { type: Boolean, default: true },
 });
 
-const emit = defineEmits(["regenerate", "split-alias", "merge-into"]);
+const emit = defineEmits([
+  "regenerate",
+  "split-alias",
+  "merge-into",
+  "move-row",
+  "delete-row",
+]);
 
 const open = ref(false);
 const submenu = ref("");
@@ -24,8 +39,17 @@ const aliasItems = computed(() =>
 
 const mergeItems = computed(() =>
   (props.mergeTargets || []).filter(
-    (target) => Number.isInteger(target.index) && String(target.label || "").trim(),
+    (target) => Number.isInteger(target.index) && String(target.name || "").trim(),
   ),
+);
+
+const moveItems = computed(() =>
+  (props.moveTargets || [])
+    .map((target) => ({
+      index: Number(target?.index),
+      name: String(target?.name || "").trim(),
+    }))
+    .filter((target) => Number.isInteger(target.index) && target.name),
 );
 
 async function toggle() {
@@ -73,6 +97,18 @@ function pickRegenerate() {
   submenu.value = "";
 }
 
+function pickMove(index) {
+  emit("move-row", index);
+  open.value = false;
+  submenu.value = "";
+}
+
+function pickDeleteRow() {
+  emit("delete-row");
+  open.value = false;
+  submenu.value = "";
+}
+
 function onDocumentPointer(event) {
   if (!open.value) return;
   const target = event.target;
@@ -116,45 +152,71 @@ onBeforeUnmount(() => {
         :style="menuStyle"
         @click.stop
       >
+        <template v-if="showEnrichedActions">
+          <button
+            type="button"
+            class="row-ops-menu__item"
+            :disabled="!canRegenerate"
+            @click="pickRegenerate"
+          >
+            <RefreshCw aria-hidden="true" />
+            Пересоздать обогащённое имя
+          </button>
+          <button
+            type="button"
+            class="row-ops-menu__item"
+            :disabled="aliasItems.length <= 1"
+            @click="openSubmenu('split')"
+          >
+            <Scissors aria-hidden="true" />
+            Извлечь…
+          </button>
+          <ul v-if="submenu === 'split'" class="row-ops-submenu">
+            <li v-for="alias in aliasItems" :key="alias">
+              <button type="button" @click="pickSplit(alias)">{{ alias }}</button>
+            </li>
+          </ul>
+          <button
+            type="button"
+            class="row-ops-menu__item"
+            :disabled="!mergeItems.length"
+            @click="openSubmenu('merge')"
+          >
+            <Merge aria-hidden="true" />
+            Влить в…
+          </button>
+          <ul v-if="submenu === 'merge'" class="row-ops-submenu">
+            <li v-for="target in mergeItems" :key="target.index">
+              <button type="button" @click="pickMerge(target.index)">
+                {{ target.name }}
+              </button>
+            </li>
+          </ul>
+        </template>
         <button
           type="button"
           class="row-ops-menu__item"
-          :disabled="!canRegenerate"
-          @click="pickRegenerate"
+          :disabled="!moveItems.length"
+          @click="openSubmenu('move')"
         >
-          <RefreshCw aria-hidden="true" />
-          Пересоздать обогащённое имя
+          <ArrowRightLeft aria-hidden="true" />
+          Переместить в другой кластер
         </button>
-        <button
-          type="button"
-          class="row-ops-menu__item"
-          :disabled="aliasItems.length <= 1"
-          @click="openSubmenu('split')"
-        >
-          <Scissors aria-hidden="true" />
-          Вычленить…
-        </button>
-        <ul v-if="submenu === 'split'" class="row-ops-submenu">
-          <li v-for="alias in aliasItems" :key="alias">
-            <button type="button" @click="pickSplit(alias)">{{ alias }}</button>
-          </li>
-        </ul>
-        <button
-          type="button"
-          class="row-ops-menu__item"
-          :disabled="!mergeItems.length"
-          @click="openSubmenu('merge')"
-        >
-          <Merge aria-hidden="true" />
-          Влить в…
-        </button>
-        <ul v-if="submenu === 'merge'" class="row-ops-submenu">
-          <li v-for="target in mergeItems" :key="target.index">
-            <button type="button" @click="pickMerge(target.index)">
-              {{ target.label }}
+        <ul v-if="submenu === 'move'" class="row-ops-submenu">
+          <li v-for="target in moveItems" :key="target.index">
+            <button type="button" @click="pickMove(target.index)">
+              {{ target.name }}
             </button>
           </li>
         </ul>
+        <button
+          type="button"
+          class="row-ops-menu__item row-ops-menu__item--danger"
+          @click="pickDeleteRow"
+        >
+          <Trash2 aria-hidden="true" />
+          Удалить строку
+        </button>
       </div>
     </Teleport>
   </div>

@@ -5,6 +5,20 @@ export function clusterUsesEnrichedNames(cluster) {
   return (cluster.rows || []).some((row) => String(row.enriched_name || "").trim());
 }
 
+function inferClusterSource(cluster) {
+  const explicit = String(cluster.source || "").trim().toLowerCase();
+  if (["memory", "ai", "manual"].includes(explicit)) return explicit;
+  if (explicit === "mixed") return "manual";
+  const rowSources = new Set(
+    (cluster.rows || [])
+      .map((row) => String(row.source || "").trim().toLowerCase())
+      .filter((source) => source === "memory" || source === "ai"),
+  );
+  if (rowSources.size === 1) return [...rowSources][0];
+  if (rowSources.size > 1) return "manual";
+  return "ai";
+}
+
 /** Формат таблицы для SourceTableEditor (режим cluster). */
 export function clusterToTable(cluster, title) {
   const useEnriched = clusterUsesEnrichedNames(cluster);
@@ -12,6 +26,8 @@ export function clusterToTable(cluster, title) {
   const headers = [leadColumn, ...(cluster.attributes || [])];
   return {
     title: title || cluster.name || "Кластер",
+    clusterSource: inferClusterSource(cluster),
+    memoryClusterName: String(cluster.memory_cluster_name || "").trim(),
     headers,
     selectedColumn: leadColumn,
     disabledColumns: [],
@@ -42,7 +58,10 @@ export function clusterToTable(cluster, title) {
         row_index,
         included: true,
         dataSource: row.source === "memory" ? "memory" : "ai",
-        aliases: aliases.length ? aliases : [String(row.item || "").trim()].filter(Boolean),
+        deleted: Boolean(row.deleted),
+        aliases: aliases.length
+          ? aliases
+          : [String(row.item || "").trim(), String(row.enriched_name || "").trim()].filter(Boolean),
         members,
         cells: Object.fromEntries(
           headers.map((h) => [

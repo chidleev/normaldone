@@ -1,30 +1,38 @@
 <script setup>
-import { computed, reactive, ref, watch } from "vue";
+import { computed, nextTick, reactive, ref, watch } from "vue";
 import {
   CheckSquare,
   ChevronLeft,
   ChevronRight,
   Database,
+  Download,
+  Cog,
   Plus,
+  RotateCcw,
+  Save,
   Sparkles,
   Square,
   Star,
   Trash2,
 } from "@lucide/vue";
 import IconButton from "./IconButton.vue";
-import MoveClusterMenu from "./MoveClusterMenu.vue";
 import NomenclatureAliasesMenu from "./NomenclatureAliasesMenu.vue";
 import DraftTextInput from "./DraftTextInput.vue";
 import ClusterRowMenu from "./ClusterRowMenu.vue";
 import AttributeMergeMenu from "./AttributeMergeMenu.vue";
 import PriorityValueMenu from "./PriorityValueMenu.vue";
-import { ENRICHED_NAME_COLUMN, NOMENCLATURE_COLUMN } from "../utils/clusterTable";
+import {
+  ENRICHED_NAME_COLUMN,
+  NOMENCLATURE_COLUMN,
+} from "../utils/clusterTable";
 
 const props = defineProps({
   mode: { type: String, default: "source" },
   source: { type: Object, default: null },
   table: { type: Object, default: null },
+  clusterSaved: { type: Boolean, default: false },
   moveTargets: { type: Array, default: () => [] },
+  highlightRowIndex: { type: Number, default: null },
 });
 
 const emit = defineEmits([
@@ -39,6 +47,7 @@ const emit = defineEmits([
   "file-upload",
   "add-row-form",
   "delete-row",
+  "restore-row",
   "move-row",
   "rename-title",
   "update-template",
@@ -48,6 +57,12 @@ const emit = defineEmits([
   "split-alias",
   "merge-row-into",
   "rededupe",
+  "export-cluster-xlsx",
+  "export-cluster-csv",
+  "load-memory-full",
+  "save-cluster-memory",
+  "renormalize-cluster",
+  "delete-memory-cluster",
   "notify",
 ]);
 
@@ -58,13 +73,16 @@ const tableData = computed(() => props.table || props.source || emptyTable());
 
 const newColumnName = ref("");
 const hiddenFileInput = ref(null);
-const disabledSet = computed(() => new Set(tableData.value.disabledColumns || []));
+const disabledSet = computed(
+  () => new Set(tableData.value.disabledColumns || [])
+);
 const isDragActive = ref(false);
 const addRowCells = ref({});
 const hoveredColumn = ref(null);
 const columnLongestCache = reactive({});
 const clusterTitleLongest = ref("");
 const clusterTemplateLongest = ref("");
+const tableWrapRef = ref(null);
 
 function rememberColumnText(header, text) {
   const key = String(header ?? "").trim();
@@ -83,7 +101,7 @@ watch(
       rememberColumnText(header, header);
     }
   },
-  { immediate: true },
+  { immediate: true }
 );
 
 watch(
@@ -95,7 +113,7 @@ watch(
       }
     }
   },
-  { immediate: true, deep: true },
+  { immediate: true, deep: true }
 );
 
 watch(
@@ -105,7 +123,7 @@ watch(
       rememberColumnText(header, value);
     }
   },
-  { deep: true },
+  { deep: true }
 );
 
 function dataSourceTitle(dataSource) {
@@ -122,6 +140,8 @@ function emptyTable() {
     selectedColumn: "",
     disabledColumns: [],
     enrichedNameTemplate: "",
+    clusterSource: "ai",
+    memoryClusterName: "",
     useEnrichedNames: false,
     rows: [],
     page: 1,
@@ -191,14 +211,18 @@ function applyDeleteColumn(header) {
 }
 
 function submitAddRowForm() {
-  const sourceCol = tableData.value.selectedColumn || tableData.value.headers[0];
+  const sourceCol =
+    tableData.value.selectedColumn || tableData.value.headers[0];
   const sourceValue = String(addRowCells.value[sourceCol] || "").trim();
   if (!sourceValue) {
     emit("notify", { text: "Укажите номенклатуру", tone: "err" });
     return;
   }
   const payload = Object.fromEntries(
-    (tableData.value.headers || []).map((h) => [h, String(addRowCells.value[h] || "").trim()]),
+    (tableData.value.headers || []).map((h) => [
+      h,
+      String(addRowCells.value[h] || "").trim(),
+    ])
   );
   payload[sourceCol] = sourceValue;
   emit("add-row-form", payload);
@@ -210,13 +234,23 @@ function getColumnClass(header) {
     "col-source": header === tableData.value.selectedColumn,
     "col-disabled": disabledSet.value.has(header),
     "col-active":
-      header === tableData.value.selectedColumn && !disabledSet.value.has(header),
+      header === tableData.value.selectedColumn &&
+      !disabledSet.value.has(header),
   };
 }
 
 function isCellEditable(header) {
   if (isCluster.value) return true;
   return header === tableData.value.selectedColumn;
+}
+
+function isRowDeleted(row) {
+  return Boolean(row?.deleted);
+}
+
+function isRowCellEditable(row, header) {
+  if (isRowDeleted(row)) return false;
+  return isCellEditable(header);
 }
 
 /** В форме новой строки редактируется только номенклатура (как в исходных данных). */
@@ -282,7 +316,7 @@ watch(
       clusterTitleLongest.value = text;
     }
   },
-  { immediate: true },
+  { immediate: true }
 );
 
 function clusterTitleSizerText(current = "") {
@@ -319,7 +353,7 @@ watch(
       clusterTemplateLongest.value = text;
     }
   },
-  { immediate: true },
+  { immediate: true }
 );
 
 function clusterTemplateSizerText(current = "") {
@@ -353,9 +387,11 @@ function mergeTargetsForRow(rowIndex) {
     .filter((row) => row.row_index !== rowIndex)
     .map((row) => ({
       index: row.row_index,
-      label: String(row.cells?.[sourceColumn.value] || "").trim() || `Строка ${row.row_index + 1}`,
+      name:
+        String(row.cells?.[sourceColumn.value] || "").trim() ||
+        `Строка ${row.row_index + 1}`,
     }))
-    .filter((target) => target.label);
+    .filter((target) => target.name);
 }
 
 function attributeMergeBehavior(header) {
@@ -390,7 +426,7 @@ function onColumnRenameCommit(oldName, value) {
 }
 
 const showEnrichedNames = computed(
-  () => isCluster.value && Boolean(tableData.value.useEnrichedNames),
+  () => isCluster.value && Boolean(tableData.value.useEnrichedNames)
 );
 
 const sourceColumn = computed(() => {
@@ -401,7 +437,27 @@ const sourceColumn = computed(() => {
 });
 
 const attributeHeaders = computed(() =>
-  (tableData.value.headers || []).filter((header) => header !== sourceColumn.value),
+  (tableData.value.headers || []).filter(
+    (header) => header !== sourceColumn.value
+  )
+);
+
+const deletedRowsCount = computed(
+  () => (tableData.value.rows || []).filter((row) => isRowDeleted(row)).length
+);
+
+watch(
+  () => props.highlightRowIndex,
+  async (rowIndex) => {
+    if (!isCluster.value || rowIndex === null || rowIndex === undefined) return;
+    await nextTick();
+    const wrap = tableWrapRef.value;
+    if (!wrap) return;
+    const row = wrap.querySelector(`tr[data-row-index="${rowIndex}"]`);
+    if (row && typeof row.scrollIntoView === "function") {
+      row.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }
 );
 </script>
 
@@ -423,25 +479,33 @@ const attributeHeaders = computed(() =>
           @commit="onClusterTitleCommit"
         >
           <template #sizer="{ text }">
-            <span class="cell-field-sizer" aria-hidden="true">{{ clusterTitleSizerText(text) }}</span>
+            <span class="cell-field-sizer" aria-hidden="true">{{
+              clusterTitleSizerText(text)
+            }}</span>
           </template>
         </DraftTextInput>
-        <DraftTextInput
-          v-if="isCluster"
-          class="cluster-template-edit"
-          input-class="cell-edit cluster-template-input"
-          :model-value="tableData.enrichedNameTemplate || ''"
-          placeholder="Шаблон: {бренд} фильтр {артикул}"
-          @commit="onClusterTemplateCommit"
-        >
-          <template #sizer="{ text }">
-            <span class="cell-field-sizer" aria-hidden="true">{{ clusterTemplateSizerText(text) }}</span>
-          </template>
-        </DraftTextInput>
+        <div v-if="isCluster" class="cluster-template-field">
+          <label class="cluster-template-label"
+            >Шаблон обогащенного стандартизованного наименования</label
+          >
+          <DraftTextInput
+            class="cluster-template-edit"
+            input-class="cell-edit cluster-template-input"
+            :model-value="tableData.enrichedNameTemplate || ''"
+            placeholder="Пример: {бренд} фильтр {артикул}"
+            @commit="onClusterTemplateCommit"
+          >
+            <template #sizer="{ text }">
+              <span class="cell-field-sizer" aria-hidden="true">{{
+                clusterTemplateSizerText(text)
+              }}</span>
+            </template>
+          </DraftTextInput>
+        </div>
         <div v-if="isSource" class="meta-line">
           <span
-            >Страница {{ tableData.page }} из {{ tableData.totalPages }} · Всего строк:
-            {{ tableData.totalRows }}</span
+            >Страница {{ tableData.page }} из {{ tableData.totalPages }} · Всего
+            строк: {{ tableData.totalRows }}</span
           >
           <span class="meta-pagination icon-actions">
             <IconButton
@@ -462,19 +526,95 @@ const attributeHeaders = computed(() =>
         </div>
         <div v-else class="meta-line cluster-meta-actions">
           <span>Строк: {{ tableData.totalRows }}</span>
-          <template v-if="showEnrichedNames">
-            <button type="button" class="btn-link" @click="emit('regenerate-all')">
-              Пересоздать имена для всех
+          <button
+            type="button"
+            class="btn-with-icon btn-with-icon--secondary btn-with-icon--mini"
+            :title="
+              props.clusterSaved
+                ? 'Кластер сохранен в Qdrant'
+                : 'Сохранить кластер в Qdrant'
+            "
+            :disabled="props.clusterSaved"
+            @click="emit('save-cluster-memory')"
+          >
+            <CheckSquare v-if="props.clusterSaved" aria-hidden="true" />
+            <Save v-else aria-hidden="true" />
+            {{ props.clusterSaved ? "Кластер сохранен" : "Сохранить кластер" }}
+          </button>
+          <span class="cluster-export-actions">
+            <button
+              type="button"
+              class="btn-with-icon btn-with-icon--secondary btn-with-icon--mini"
+              title="Скачать текущий кластер в XLSX"
+              @click="emit('export-cluster-xlsx')"
+            >
+              <Download aria-hidden="true" />
+              XLSX
             </button>
-            <button type="button" class="btn-link" @click="emit('rededupe')">
-              Пересчитать дубликаты
+            <button
+              type="button"
+              class="btn-with-icon btn-with-icon--secondary btn-with-icon--mini"
+              title="Скачать текущий кластер в CSV"
+              @click="emit('export-cluster-csv')"
+            >
+              <Download aria-hidden="true" />
+              CSV
             </button>
-          </template>
+          </span>
+          <button
+            v-if="showEnrichedNames"
+            type="button"
+            class="btn-with-icon btn-with-icon--secondary btn-with-icon--mini"
+            @click="emit('regenerate-all')"
+          >
+            <RotateCcw aria-hidden="true" />
+            Пересоздать имена
+          </button>
+          <button
+            v-if="showEnrichedNames"
+            type="button"
+            class="btn-with-icon btn-with-icon--secondary btn-with-icon--mini"
+            @click="emit('rededupe')"
+          >
+            <Sparkles aria-hidden="true" />
+            Пересчитать дубликаты
+          </button>
+          <button
+            type="button"
+            class="btn-with-icon btn-with-icon--secondary btn-with-icon--mini"
+            @click="emit('renormalize-cluster')"
+          >
+            <Sparkles aria-hidden="true" />
+            Перенормализовать
+          </button>
+          <button
+            v-if="tableData.clusterSource === 'memory' && tableData.memoryClusterName"
+            type="button"
+            class="btn-with-icon btn-with-icon--secondary btn-with-icon--mini"
+            title="Подгрузить весь кластер из памяти"
+            @click="emit('load-memory-full')"
+          >
+            <Database aria-hidden="true" />
+            Загрузить полностью
+          </button>
+          <button
+            v-if="tableData.clusterSource === 'memory'"
+            type="button"
+            class="btn-with-icon btn-with-icon--secondary btn-with-icon--mini danger cluster-meta-actions__danger"
+            @click="emit('delete-memory-cluster')"
+          >
+            <Trash2 aria-hidden="true" />
+            Удалить из памяти
+          </button>
+          <span v-if="deletedRowsCount" class="cluster-deleted-hint">
+            Удаленные строки: {{ deletedRowsCount }} (перенесены в конец и
+            исключены из сохранения)
+          </span>
         </div>
       </div>
     </div>
 
-    <div class="table-wrap">
+    <div ref="tableWrapRef" class="table-wrap">
       <table>
         <thead
           @mouseover="onTheadMouseOver"
@@ -504,11 +644,16 @@ const attributeHeaders = computed(() =>
                 <IconButton
                   v-if="isSource"
                   :title="
-                    disabledSet.has(sourceColumn) ? 'Включить атрибут' : 'Исключить атрибут'
+                    disabledSet.has(sourceColumn)
+                      ? 'Включить атрибут'
+                      : 'Исключить атрибут'
                   "
                   @click="applyToggleEnabled(sourceColumn)"
                 >
-                  <Square v-if="disabledSet.has(sourceColumn)" aria-hidden="true" />
+                  <Square
+                    v-if="disabledSet.has(sourceColumn)"
+                    aria-hidden="true"
+                  />
                   <CheckSquare v-else aria-hidden="true" />
                 </IconButton>
                 <IconButton
@@ -548,7 +693,11 @@ const attributeHeaders = computed(() =>
                 </IconButton>
                 <IconButton
                   v-if="isSource"
-                  :title="disabledSet.has(header) ? 'Включить атрибут' : 'Исключить атрибут'"
+                  :title="
+                    disabledSet.has(header)
+                      ? 'Включить атрибут'
+                      : 'Исключить атрибут'
+                  "
                   @click="applyToggleEnabled(header)"
                 >
                   <Square v-if="disabledSet.has(header)" aria-hidden="true" />
@@ -559,7 +708,9 @@ const attributeHeaders = computed(() =>
                   :attribute="header"
                   :behavior="attributeMergeBehavior(header)"
                   :separator="attributeMergeSeparator(header)"
-                  @update-config="(payload) => emit('set-attribute-merge-config', payload)"
+                  @update-config="
+                    (payload) => emit('set-attribute-merge-config', payload)
+                  "
                 />
                 <IconButton
                   title="Удалить столбец"
@@ -573,7 +724,15 @@ const attributeHeaders = computed(() =>
             </th>
           </tr>
           <tr class="col-head-row">
-            <th class="sticky-check">{{ isCluster ? "Действия" : "Вкл" }}</th>
+            <th class="sticky-check">
+              <Cog
+                v-if="isCluster"
+                class="table-actions-head-icon"
+                title="Действия"
+                aria-hidden="true"
+              />
+              <template v-else>Вкл</template>
+            </th>
             <th
               v-if="sourceColumn"
               :key="sourceColumn"
@@ -602,7 +761,9 @@ const attributeHeaders = computed(() =>
             <th class="col-add-column col-head-cell">
               <div class="col-head">
                 <div class="cell-field-box">
-                  <span class="cell-field-sizer" aria-hidden="true">{{ newColumnSizerText() }}</span>
+                  <span class="cell-field-sizer" aria-hidden="true">{{
+                    newColumnSizerText()
+                  }}</span>
                   <input
                     v-model="newColumnName"
                     class="cell-edit col-input"
@@ -649,10 +810,17 @@ const attributeHeaders = computed(() =>
                 </IconButton>
               </div>
             </td>
-            <td v-if="sourceColumn" class="cell-field" :class="getColumnClass(sourceColumn)">
+            <td
+              v-if="sourceColumn"
+              class="cell-field"
+              :class="getColumnClass(sourceColumn)"
+            >
               <div class="cell-field-box">
                 <span class="cell-field-sizer" aria-hidden="true">{{
-                  fieldSizerText(sourceColumn, addRowCells[sourceColumn] || "Новая номенклатура")
+                  fieldSizerText(
+                    sourceColumn,
+                    addRowCells[sourceColumn] || "Новая номенклатура"
+                  )
                 }}</span>
                 <input
                   class="cell-edit"
@@ -687,31 +855,53 @@ const attributeHeaders = computed(() =>
               </div>
             </td>
           </tr>
-          <tr v-for="row in tableData.rows" :key="row.row_index">
+          <tr
+            v-for="row in tableData.rows"
+            :key="row.row_index"
+            :data-row-index="row.row_index"
+            :class="{
+              'table-row--deleted': isRowDeleted(row),
+              'table-row--highlight': isCluster && props.highlightRowIndex === row.row_index,
+            }"
+          >
             <td class="sticky-check table-check-cell">
               <div class="row-action-cell">
-                <IconButton title="Удалить строку" danger @click="emit('delete-row', row.row_index)">
-                  <Trash2 aria-hidden="true" />
+                <IconButton
+                  v-if="isCluster && isRowDeleted(row)"
+                  title="Восстановить строку"
+                  @click="emit('restore-row', row.row_index)"
+                >
+                  <RotateCcw aria-hidden="true" />
                 </IconButton>
                 <ClusterRowMenu
-                  v-if="isCluster && showEnrichedNames"
+                  v-else-if="isCluster"
                   :aliases="row.aliases"
                   :merge-targets="mergeTargetsForRow(row.row_index)"
+                  :move-targets="moveTargets"
+                  :show-enriched-actions="showEnrichedNames"
                   @regenerate="emit('regenerate-row', row.row_index)"
-                  @split-alias="(alias) => emit('split-alias', { rowIndex: row.row_index, alias })"
+                  @split-alias="
+                    (alias) =>
+                      emit('split-alias', { rowIndex: row.row_index, alias })
+                  "
                   @merge-into="
                     (targetIndex) =>
-                      emit('merge-row-into', { sourceIndex: row.row_index, targetIndex })
+                      emit('merge-row-into', {
+                        sourceIndex: row.row_index,
+                        targetIndex,
+                      })
                   "
-                />
-                <MoveClusterMenu
-                  v-else-if="isCluster"
-                  :targets="moveTargets"
-                  @select="(targetClusterIdx) => onMoveRow(row.row_index, targetClusterIdx)"
+                  @move-row="
+                    (targetClusterIdx) =>
+                      onMoveRow(row.row_index, targetClusterIdx)
+                  "
+                  @delete-row="emit('delete-row', row.row_index)"
                 />
                 <template v-else>
                   <IconButton
-                    :title="row.included ? 'Исключить строку' : 'Включить строку'"
+                    :title="
+                      row.included ? 'Исключить строку' : 'Включить строку'
+                    "
                     @click="
                       emit('toggle-row', {
                         rowIndex: row.row_index,
@@ -722,6 +912,13 @@ const attributeHeaders = computed(() =>
                     <CheckSquare v-if="row.included" aria-hidden="true" />
                     <Square v-else aria-hidden="true" />
                   </IconButton>
+                  <IconButton
+                    title="Удалить строку"
+                    danger
+                    @click="emit('delete-row', row.row_index)"
+                  >
+                    <Trash2 aria-hidden="true" />
+                  </IconButton>
                 </template>
               </div>
             </td>
@@ -729,15 +926,16 @@ const attributeHeaders = computed(() =>
               v-if="sourceColumn"
               :class="[
                 getColumnClass(sourceColumn),
-                { 'cell-field': isCellEditable(sourceColumn) },
+                { 'cell-field': isRowCellEditable(row, sourceColumn) },
               ]"
             >
               <div
-                v-if="isCellEditable(sourceColumn)"
+                v-if="isRowCellEditable(row, sourceColumn)"
                 class="cell-field-box"
                 :class="{
                   'cell-field-box--with-source': isCluster,
-                  'cell-field-box--with-aliases': isCluster && showEnrichedNames,
+                  'cell-field-box--with-aliases':
+                    isCluster && showEnrichedNames,
                 }"
               >
                 <NomenclatureAliasesMenu
@@ -754,13 +952,20 @@ const attributeHeaders = computed(() =>
                     class="row-source-icon__svg"
                     aria-hidden="true"
                   />
-                  <Sparkles v-else class="row-source-icon__svg" aria-hidden="true" />
+                  <Sparkles
+                    v-else
+                    class="row-source-icon__svg"
+                    aria-hidden="true"
+                  />
                 </span>
                 <DraftTextInput
                   class="cell-field-inner"
                   input-class="cell-edit"
                   :model-value="String(row.cells?.[sourceColumn] ?? '')"
-                  @commit="(value) => onRowCellCommit(row.row_index, sourceColumn, value)"
+                  @commit="
+                    (value) =>
+                      onRowCellCommit(row.row_index, sourceColumn, value)
+                  "
                 >
                   <template #sizer="{ text }">
                     <span class="cell-field-sizer" aria-hidden="true">{{
@@ -774,7 +979,8 @@ const attributeHeaders = computed(() =>
                 class="cell-field-box cell-field-box--static"
                 :class="{
                   'cell-field-box--with-source': isCluster && row.dataSource,
-                  'cell-field-box--with-aliases': isCluster && showEnrichedNames,
+                  'cell-field-box--with-aliases':
+                    isCluster && showEnrichedNames,
                 }"
               >
                 <NomenclatureAliasesMenu
@@ -791,7 +997,11 @@ const attributeHeaders = computed(() =>
                     class="row-source-icon__svg"
                     aria-hidden="true"
                   />
-                  <Sparkles v-else class="row-source-icon__svg" aria-hidden="true" />
+                  <Sparkles
+                    v-else
+                    class="row-source-icon__svg"
+                    aria-hidden="true"
+                  />
                 </span>
                 <div class="cell-field-inner">
                   <span class="cell-field-sizer" aria-hidden="true">{{
@@ -809,12 +1019,12 @@ const attributeHeaders = computed(() =>
               :key="`${row.row_index}-${header}`"
               :class="[
                 getColumnClass(header),
-                { 'cell-inert': !isCellEditable(header) },
-                { 'cell-field': isCellEditable(header) },
+                { 'cell-inert': !isRowCellEditable(row, header) },
+                { 'cell-field': isRowCellEditable(row, header) },
               ]"
             >
               <div
-                v-if="isCellEditable(header)"
+                v-if="isRowCellEditable(row, header)"
                 class="cell-field-box"
                 :class="{
                   'cell-field-box--with-priority-conflict':
@@ -825,7 +1035,9 @@ const attributeHeaders = computed(() =>
                   class="cell-field-inner"
                   input-class="cell-edit"
                   :model-value="String(row.cells?.[header] ?? '')"
-                  @commit="(value) => onRowCellCommit(row.row_index, header, value)"
+                  @commit="
+                    (value) => onRowCellCommit(row.row_index, header, value)
+                  "
                 >
                   <template #sizer="{ text }">
                     <span class="cell-field-sizer" aria-hidden="true">{{
@@ -837,14 +1049,18 @@ const attributeHeaders = computed(() =>
                   v-if="priorityConflictValues(row, header).length > 1"
                   :values="priorityConflictValues(row, header)"
                   :current-value="String(row.cells?.[header] ?? '')"
-                  @select="(value) => onRowCellCommit(row.row_index, header, value)"
+                  @select="
+                    (value) => onRowCellCommit(row.row_index, header, value)
+                  "
                 />
               </div>
               <div v-else class="cell-field-box cell-field-box--static">
                 <span class="cell-field-sizer" aria-hidden="true">{{
                   fieldSizerText(header, row.cells?.[header])
                 }}</span>
-                <span class="cell-static-text">{{ String(row.cells?.[header] ?? "") }}</span>
+                <span class="cell-static-text">{{
+                  String(row.cells?.[header] ?? "")
+                }}</span>
               </div>
             </td>
           </tr>
