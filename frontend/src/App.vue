@@ -35,7 +35,7 @@ import { Cog } from "@lucide/vue";
 
 const backendUrl = ref(import.meta.env.VITE_DEFAULT_BACKEND_URL || "");
 
-const { request, apiUrl } = useApi(() => backendUrl.value);
+const { request, apiUrl, resolveBackendBaseUrl } = useApi(() => backendUrl.value);
 const { sessionId, ensureSession, dropSession } = useSession(request);
 const {
   source,
@@ -1181,6 +1181,13 @@ async function flushQdrant() {
   }, "Очистка Qdrant");
 }
 
+function openSwaggerDocs() {
+  const fromField = resolveBackendBaseUrl(backendUrl.value);
+  const fromEnv = resolveBackendBaseUrl(import.meta.env.VITE_API_BASE_URL || "");
+  const base = fromField || fromEnv || "http://localhost:8000";
+  window.open(`${base}/docs`, "_blank", "noopener,noreferrer");
+}
+
 async function exportXlsx() {
   await runSafe(async () => {
     await ensureSession();
@@ -1398,6 +1405,7 @@ onMounted(async () => {
       @flush-qdrant="flushQdrant"
       @load-test-cluster="loadTestCluster"
       @open-memory-search="openMemorySearchTab"
+      @open-swagger="openSwaggerDocs"
     />
 
     <StatusLine

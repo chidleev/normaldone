@@ -1,5 +1,6 @@
 <script setup>
 import {
+  BookOpen,
   Database,
   Download,
   Eraser,
@@ -39,6 +40,7 @@ const emit = defineEmits([
   "flush-qdrant",
   "load-test-cluster",
   "open-memory-search",
+  "open-swagger",
 ]);
 </script>
 
@@ -47,12 +49,20 @@ const emit = defineEmits([
     <div class="toolbar-row">
       <label class="field">
         <span>Backend URL</span>
-        <input
-          type="text"
-          :value="backendUrl"
-          placeholder=""
-          @input="emit('update:backendUrl', $event.target.value)"
-        />
+        <div class="toolbar-backend-field">
+          <IconButton
+            title="Swagger (OpenAPI)"
+            @click="emit('open-swagger')"
+          >
+            <BookOpen aria-hidden="true" />
+          </IconButton>
+          <input
+            type="text"
+            :value="backendUrl"
+            placeholder=""
+            @input="emit('update:backendUrl', $event.target.value)"
+          />
+        </div>
       </label>
       <FormSelectMenu
         label="Векторизация"

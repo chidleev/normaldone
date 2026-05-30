@@ -53,6 +53,18 @@ body {
     color: var(--muted);
 }
 
+.toolbar-backend-field {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.toolbar-backend-field .icon-btn {
+    width: 32px;
+    min-width: 32px;
+    height: 32px;
+}
+
 .field-select {
     position: relative;
 }
