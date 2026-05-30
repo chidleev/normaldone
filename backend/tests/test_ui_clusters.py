@@ -1,5 +1,6 @@
 from api.ui_router import (
     _build_default_clusters,
+    _cluster_export_rows,
     _cluster_from_memory_points,
     _clusters_from_known_items,
     _normalize_cluster_attribute_mode,
@@ -165,6 +166,25 @@ def test_cluster_from_memory_points_preserves_member_specific_values() -> None:
     by_item = {member["item"]: member["values"] for member in row["members"]}
     assert by_item["Фильтр A"]["артикул"] == "P1"
     assert by_item["Фильтр B"]["артикул"] == "P2"
+
+
+def test_cluster_export_rows_keeps_only_merged_rows_when_rows_exist() -> None:
+    cluster = {
+        "attributes": ["бренд", "артикул"],
+        "items": ["Фильтр A", "Фильтр B"],
+        "rows": [
+            {
+                "enriched_name": "Donaldson фильтр P1",
+                "aliases": ["Фильтр A", "Фильтр B"],
+                "values": {"бренд": "Donaldson", "артикул": "P1"},
+            }
+        ],
+    }
+
+    attributes, rows_out = _cluster_export_rows(cluster, normalized_map={})
+
+    assert attributes == ["бренд", "артикул"]
+    assert rows_out == [["Donaldson фильтр P1", "Фильтр A; Фильтр B", "Donaldson", "P1"]]
 
 
 def test_extract_resume_indexes_filters_invalid_values() -> None:

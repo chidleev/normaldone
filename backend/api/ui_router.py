@@ -969,6 +969,8 @@ def _cluster_export_rows(
                 ]
             )
             continue
+    if rows_out:
+        return attributes, rows_out
     for item_name in items:
         values = normalized_map.get(item_name, {})
         rows_out.append(
